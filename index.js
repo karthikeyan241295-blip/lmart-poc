@@ -1,21 +1,19 @@
 require('dotenv').config();
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
-const { GoogleGenAI } = require('@google/genai');
 
-// Validate Token
+// Validate Environment Variables
 if (!process.env.TELEGRAM_BOT_TOKEN) {
-  console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing in environment variables.');
+  console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing.');
   process.exit(1);
 }
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-// Session storage for user coordinates
+// In-memory store for session coordinates
 const userSessions = new Map();
 
-// Default coordinates fallback (Ichipatti / Tiruppur: 11.0168, 77.2514)
+// Default fallback coordinates (Ichipatti / Tiruppur: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
@@ -23,7 +21,7 @@ const DEFAULT_LNG = 77.2514;
 bot.start((ctx) => {
   ctx.reply(
     `👋 *Welcome to LMart* — Your Hyperlocal AI Shopping Agent!\n\n` +
-    `Tell me what item you are looking for (e.g., *"Type-C 65W charger"*, *"Drill machine"*, *"Paracetamol"*).\n\n` +
+    `Tell me what item you are looking for (e.g., *"Type-C fast charger"*, *"Drill machine"*, *"Paracetamol"*).\n\n` +
     `📍 Share your live location below to search nearest shops.`,
     {
       parse_mode: 'Markdown',
@@ -34,7 +32,7 @@ bot.start((ctx) => {
   );
 });
 
-// 2. Handle Location message
+// 2. Handle Location sharing
 bot.on('location', (ctx) => {
   const { latitude, longitude } = ctx.message.location;
   userSessions.set(ctx.chat.id, { latitude, longitude });
@@ -56,7 +54,7 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent with Gemini AI
+    // Step A: Parse Intent using Gemini REST API
     const parsedIntent = await parseProductIntent(queryText);
 
     // Step B: Query Google Places API
@@ -75,7 +73,7 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    // Step C: Format Response with Google Maps Links
+    // Step C: Format Response Card with Directions
     let responseText = `🛒 *LMart Stock Finder*\n`;
     responseText += `*Item:* ${parsedIntent.productName}\n`;
     responseText += `*Category:* ${parsedIntent.category}\n\n`;
@@ -85,7 +83,7 @@ bot.on('text', async (ctx) => {
 
     stores.slice(0, 3).forEach((store, index) => {
       const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total})` : '⭐ New';
-      const openStatus = store.opening_hours?.open_now ? '🟢 Open Now' : '⚪ Open Status Unverified';
+      const openStatus = store.opening_hours?.open_now ? '🟢 Open Now' : '⚪ Status Unverified';
 
       responseText += `*${index + 1}. ${store.name}*\n`;
       responseText += `📍 ${store.vicinity || store.formatted_address || 'View on map'}\n`;
@@ -115,32 +113,34 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ Unable to complete search. Please check your API keys or try again.`
+      `⚠️ Unable to complete search. Please verify your API keys and try again.`
     );
   }
 });
 
-// Helper 1: Category & Intent Classification
+// Helper 1: Category & Intent Classification using Gemini API
 async function parseProductIntent(userInput) {
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
   const prompt = `
-  Analyze this shopping search: "${userInput}".
+  You are an e-commerce taxonomy classifier. Analyze this shopping search: "${userInput}".
   Extract the product name, category, and the best search keyword for local stores on Google Maps.
   
-  Return strictly JSON:
+  Return strictly JSON format:
   {
     "productName": "string",
     "category": "string",
-    "searchKeyword": "string (e.g. electronics store, hardware shop, pharmacy)"
+    "searchKeyword": "string (e.g. electronics store, hardware shop, pharmacy, stationery)"
   }
   `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-1.5-flash',
-    contents: prompt,
-    config: { responseMimeType: 'application/json' }
+  const response = await axios.post(geminiUrl, {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { responseMimeType: 'application/json' }
   });
 
-  return JSON.parse(response.text.trim());
+  const rawText = response.data.candidates[0].content.parts[0].text;
+  return JSON.parse(rawText.trim());
 }
 
 // Helper 2: Google Places Search
