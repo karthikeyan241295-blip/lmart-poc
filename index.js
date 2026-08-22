@@ -3,7 +3,7 @@ const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// 1. Health-Check Server (Satisfies Render's Port Scan)
+// 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('LMart Telegram Bot is active and healthy!\n');
@@ -14,10 +14,19 @@ server.listen(PORT, () => {
   console.log(`🌐 Server listening on port ${PORT}`);
 });
 
-// 2. Clean Environment Variables
-const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').replace(/['"]/g, '').trim();
-const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '').trim();
-const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY || '').replace(/['"]/g, '').trim();
+// 2. Intelligent Environment Cleaner (Strips accidental variable names, quotes, spaces)
+function cleanSecret(val) {
+  if (!val) return '';
+  let str = val.toString().trim().replace(/[\r\n"']/g, '');
+  if (str.includes('=')) {
+    str = str.split('=').pop().trim();
+  }
+  return str;
+}
+
+const TELEGRAM_BOT_TOKEN = cleanSecret(process.env.TELEGRAM_BOT_TOKEN);
+const GEMINI_API_KEY = cleanSecret(process.env.GEMINI_API_KEY);
+const GOOGLE_MAPS_API_KEY = cleanSecret(process.env.GOOGLE_MAPS_API_KEY);
 
 if (!TELEGRAM_BOT_TOKEN) {
   console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing.');
@@ -27,7 +36,7 @@ if (!TELEGRAM_BOT_TOKEN) {
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const userSessions = new Map();
 
-// Default coordinates fallback (Ichipatti / Tiruppur: 11.0168, 77.2514)
+// Default coordinates fallback (Ichipatti / Tiruppur / Palladam area: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
@@ -46,10 +55,13 @@ bot.start((ctx) => {
   );
 });
 
-// 4. Handle Location
+// 4. Handle Location sharing
 bot.on('location', (ctx) => {
   const { latitude, longitude } = ctx.message.location;
-  userSessions.set(ctx.chat.id, { latitude, longitude });
+  userSessions.set(ctx.chat.id, { 
+    latitude: Number(latitude) || DEFAULT_LAT, 
+    longitude: Number(longitude) || DEFAULT_LNG 
+  });
 
   ctx.reply(
     `✅ Location received!\n\nWhat product do you want to find?`,
@@ -68,10 +80,10 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent (with safe JSON parser & multi-model fallback)
+    // Step A: Parse Intent with Gemini (with fallback)
     const parsedIntent = await parseProductIntent(queryText);
 
-    // Step B: Query Google Places API (New)
+    // Step B: Query Google Places API (with auto-fallback on any error)
     let stores = [];
     try {
       stores = await searchNearbyStores(
@@ -80,46 +92,41 @@ bot.on('text', async (ctx) => {
         session.longitude
       );
     } catch (err) {
-      console.error('Google Places API Error:', err.message);
-      return ctx.telegram.editMessageText(
-        chatId,
-        statusMsg.message_id,
-        null,
-        `⚠️ Google Maps Error: ${err.message}`
-      );
+      console.warn('Google Places API notice:', err.message);
+      stores = []; // Graceful fallback
     }
 
-    if (!stores || stores.length === 0) {
-      return ctx.telegram.editMessageText(
-        chatId,
-        statusMsg.message_id,
-        null,
-        `❌ No nearby stores found within 5 km for "*${parsedIntent.productName}*". Try searching for a broader term.`
-      );
-    }
-
-    // Step C: Format Response Card
+    // Step C: Build Interactive Response Card
     let responseText = `🛒 *LMart Stock Finder*\n`;
     responseText += `*Item:* ${parsedIntent.productName}\n`;
     responseText += `*Category:* ${parsedIntent.category}\n\n`;
-    responseText += `Found *${stores.length} nearby stores*:\n\n`;
 
     const inlineButtons = [];
 
-    stores.slice(0, 3).forEach((store, index) => {
-      const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ New';
-      const openStatus = store.open_now ? '🟢 Open Now' : '⚪ Status Unverified';
+    if (stores && stores.length > 0) {
+      responseText += `Found *${stores.length} nearby stores*:\n\n`;
 
-      responseText += `*${index + 1}. ${store.name}*\n`;
-      responseText += `📍 ${store.formatted_address}\n`;
-      responseText += `${rating} | ${openStatus}\n\n`;
+      stores.slice(0, 3).forEach((store, index) => {
+        const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ New';
+        const openStatus = store.open_now ? '🟢 Open Now' : '⚪ Status Unverified';
 
-      const navUrl = `[https://www.google.com/maps/dir/?api=1&destination=$](https://www.google.com/maps/dir/?api=1&destination=$){store.lat},${store.lng}&destination_place_id=${store.place_id}`;
-      
+        responseText += `*${index + 1}. ${store.name}*\n`;
+        responseText += `📍 ${store.formatted_address}\n`;
+        responseText += `${rating} | ${openStatus}\n\n`;
+
+        const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(store.lat)},${encodeURIComponent(store.lng)}`;
+        inlineButtons.push([
+          Markup.button.url(`🗺️ Directions: ${store.name.substring(0, 22)}`, navUrl)
+        ]);
+      });
+    } else {
+      // Direct Google Maps Search Fallback (Always Works)
+      responseText += `📍 Tap below to explore verified shops nearby in your area:`;
+      const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(parsedIntent.searchKeyword)}/@${session.latitude},${session.longitude},14z`;
       inlineButtons.push([
-        Markup.button.url(`🗺️ Directions: ${store.name.substring(0, 22)}`, navUrl)
+        Markup.button.url(`🗺️ Explore "${parsedIntent.searchKeyword}" on Maps`, directSearchUrl)
       ]);
-    });
+    }
 
     await ctx.telegram.editMessageText(
       chatId,
@@ -138,12 +145,12 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ An unexpected error occurred. Please try again.`
+      `⚠️ An error occurred. Please try again.`
     );
   }
 });
 
-// Helper: Safe JSON Parser (Handles markdown codeblocks & formatting issues)
+// Helper: Safe JSON Parser
 function safeJsonParse(text) {
   if (!text) return null;
   const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -165,67 +172,73 @@ function safeJsonParse(text) {
 // Helper 1: Category & Intent Classification
 async function parseProductIntent(userInput) {
   const prompt = `
-  You are an e-commerce taxonomy classifier. Analyze this shopping search: "${userInput}".
-  Extract the product name, category, and the best search keyword for local retail stores on Google Maps.
-  
-  Return strictly JSON format:
+  Analyze this shopping search: "${userInput}".
+  Extract product name, category, and best search keyword for local stores on Google Maps.
+  Return strictly valid JSON:
   {
     "productName": "string",
     "category": "string",
-    "searchKeyword": "string (e.g. electronics store, hardware shop, medical pharmacy, stationery)"
+    "searchKeyword": "string"
   }
   `;
 
-  const modelEndpoints = [
-    `[https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=$){GEMINI_API_KEY}`,
-    `[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$){GEMINI_API_KEY}`,
-    `[https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=$](https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=$){GEMINI_API_KEY}`
-  ];
+  if (GEMINI_API_KEY && !GEMINI_API_KEY.startsWith('http')) {
+    const modelEndpoints = [
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
+    ];
 
-  for (const endpoint of modelEndpoints) {
-    try {
-      const response = await axios.post(
-        endpoint,
-        {
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: 'application/json' }
-        },
-        { timeout: 6000 }
-      );
+    for (const endpoint of modelEndpoints) {
+      try {
+        const response = await axios.post(
+          endpoint,
+          {
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: 'application/json' }
+          },
+          { timeout: 5000 }
+        );
 
-      const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      const parsed = safeJsonParse(rawText);
-      if (parsed && parsed.searchKeyword) {
-        return parsed;
+        const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        const parsed = safeJsonParse(rawText);
+        if (parsed && parsed.searchKeyword) {
+          return parsed;
+        }
+      } catch (err) {
+        continue;
       }
-    } catch (err) {
-      continue;
     }
   }
 
-  // Graceful rule-based fallback
   return {
     productName: userInput,
     category: "General Retail",
-    searchKeyword: `${userInput} store`
+    searchKeyword: `${userInput} shop`
   };
 }
 
-// Helper 2: Google Places API (New) Search
+// Helper 2: Google Places API Search
 async function searchNearbyStores(keyword, lat, lng) {
-  const url = `[https://places.googleapis.com/v1/places:searchText](https://places.googleapis.com/v1/places:searchText)`;
+  if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.startsWith('http')) {
+    return [];
+  }
+
+  const validLat = Number(lat) || DEFAULT_LAT;
+  const validLng = Number(lng) || DEFAULT_LNG;
+  const url = `https://places.googleapis.com/v1/places:searchText`;
 
   const response = await axios.post(
     url,
     {
-      textQuery: keyword,
+      textQuery: String(keyword || 'store').trim(),
       locationBias: {
         circle: {
           center: {
-            latitude: lat,
-            longitude: lng
+            latitude: validLat,
+            longitude: validLng
           },
-          radius: 5000.0 // 5 km search radius
+          radius: 5000.0
         }
       },
       maxResultCount: 5
@@ -236,7 +249,7 @@ async function searchNearbyStores(keyword, lat, lng) {
         'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
         'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location'
       },
-      timeout: 8000
+      timeout: 6000
     }
   );
 
@@ -247,9 +260,9 @@ async function searchNearbyStores(keyword, lat, lng) {
     rating: p.rating,
     user_ratings_total: p.userRatingCount,
     open_now: p.currentOpeningHours?.openNow,
-    lat: p.location?.latitude,
-    lng: p.location?.longitude,
-    place_id: p.id
+    lat: p.location?.latitude || validLat,
+    lng: p.location?.longitude || validLng,
+    place_id: p.id || ''
   }));
 }
 
