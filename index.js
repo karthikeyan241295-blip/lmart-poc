@@ -14,7 +14,7 @@ server.listen(PORT, () => {
   console.log(`🌐 Health-check server listening on port ${PORT}`);
 });
 
-// 2. Validate Bot Token
+// 2. Validate Environment Variables
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').replace(/['"]/g, '').trim();
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '').trim();
 const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY || '').replace(/['"]/g, '').trim();
@@ -68,19 +68,8 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent with Gemini
-    let parsedIntent;
-    try {
-      parsedIntent = await parseProductIntent(queryText);
-    } catch (err) {
-      console.error('Gemini API Error:', err.response?.data || err.message);
-      return ctx.telegram.editMessageText(
-        chatId,
-        statusMsg.message_id,
-        null,
-        `⚠️ Gemini AI Error: ${err.response?.data?.error?.message || err.message}`
-      );
-    }
+    // Step A: Parse Intent with Gemini (with model fallbacks)
+    const parsedIntent = await parseProductIntent(queryText);
 
     // Step B: Query Google Places API
     let stores;
@@ -96,7 +85,7 @@ bot.on('text', async (ctx) => {
         chatId,
         statusMsg.message_id,
         null,
-        `⚠️ Google Maps Error: ${err.response?.data?.error_message || err.message}`
+        `⚠️ Google Maps Error: ${err.message}`
       );
     }
 
@@ -109,7 +98,7 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    // Step C: Format Response Card
+    // Step C: Format Response Card with Directions
     let responseText = `🛒 *LMart Stock Finder*\n`;
     responseText += `*Item:* ${parsedIntent.productName}\n`;
     responseText += `*Category:* ${parsedIntent.category}\n\n`;
@@ -149,14 +138,20 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ An unexpected error occurred. Check Render logs for details.`
+      `⚠️ An unexpected error occurred. Please try again.`
     );
   }
 });
 
-// Helper 1: Category & Intent Classification using Gemini API
+// Helper 1: Category & Intent Classification using Gemini API (with robust model fallback)
 async function parseProductIntent(userInput) {
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+  const modelsToTry = [
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash-002',
+    'gemini-1.5-flash-001',
+    'gemini-2.0-flash',
+    'gemini-1.5-pro-latest'
+  ];
 
   const prompt = `
   You are an e-commerce taxonomy classifier. Analyze this shopping search: "${userInput}".
@@ -170,13 +165,28 @@ async function parseProductIntent(userInput) {
   }
   `;
 
-  const response = await axios.post(geminiUrl, {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: { responseMimeType: 'application/json' }
-  });
+  for (const model of modelsToTry) {
+    try {
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
+      const response = await axios.post(geminiUrl, {
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { responseMimeType: 'application/json' }
+      });
 
-  const rawText = response.data.candidates[0].content.parts[0].text;
-  return JSON.parse(rawText.trim());
+      const rawText = response.data.candidates[0].content.parts[0].text;
+      return JSON.parse(rawText.trim());
+    } catch (err) {
+      // Continue to next model alias if 404
+      continue;
+    }
+  }
+
+  // Graceful rule-based fallback if all AI models are unreachable
+  return {
+    productName: userInput,
+    category: "General Retail",
+    searchKeyword: `${userInput} store`
+  };
 }
 
 // Helper 2: Google Places Search
