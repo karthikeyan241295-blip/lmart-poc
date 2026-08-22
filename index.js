@@ -3,7 +3,7 @@ const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// 1. Lightweight Health-Check HTTP Server
+// 1. Lightweight Health-Check Server for Render
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('LMart Telegram Bot is active and healthy!\n');
@@ -14,7 +14,7 @@ server.listen(PORT, () => {
   console.log(`🌐 Health-check server listening on port ${PORT}`);
 });
 
-// 2. Validate Environment Variables
+// 2. Clean Environment Variables
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').replace(/['"]/g, '').trim();
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '').trim();
 const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY || '').replace(/['"]/g, '').trim();
@@ -68,11 +68,11 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent with Gemini (with model fallbacks)
+    // Step A: Parse Intent with Gemini (with multi-model fallback)
     const parsedIntent = await parseProductIntent(queryText);
 
-    // Step B: Query Google Places API
-    let stores;
+    // Step B: Query Google Places API (New)
+    let stores = [];
     try {
       stores = await searchNearbyStores(
         parsedIntent.searchKeyword,
@@ -80,7 +80,7 @@ bot.on('text', async (ctx) => {
         session.longitude
       );
     } catch (err) {
-      console.error('Google Places API Error:', err.response?.data || err.message);
+      console.error('Google Places API Error:', err.message);
       return ctx.telegram.editMessageText(
         chatId,
         statusMsg.message_id,
@@ -94,11 +94,11 @@ bot.on('text', async (ctx) => {
         chatId,
         statusMsg.message_id,
         null,
-        `❌ No nearby stores found within 5 km for "*${parsedIntent.productName}*".`
+        `❌ No nearby stores found within 5 km for "*${parsedIntent.productName}*". Try searching for a broader term.`
       );
     }
 
-    // Step C: Format Response Card with Directions
+    // Step C: Format Response Card with Google Maps Links
     let responseText = `🛒 *LMart Stock Finder*\n`;
     responseText += `*Item:* ${parsedIntent.productName}\n`;
     responseText += `*Category:* ${parsedIntent.category}\n\n`;
@@ -107,14 +107,14 @@ bot.on('text', async (ctx) => {
     const inlineButtons = [];
 
     stores.slice(0, 3).forEach((store, index) => {
-      const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total})` : '⭐ New';
-      const openStatus = store.opening_hours?.open_now ? '🟢 Open Now' : '⚪ Status Unverified';
+      const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ New';
+      const openStatus = store.open_now ? '🟢 Open Now' : '⚪ Status Unverified';
 
       responseText += `*${index + 1}. ${store.name}*\n`;
-      responseText += `📍 ${store.vicinity || store.formatted_address || 'View on map'}\n`;
+      responseText += `📍 ${store.formatted_address}\n`;
       responseText += `${rating} | ${openStatus}\n\n`;
 
-      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${store.geometry.location.lat},${store.geometry.location.lng}&destination_place_id=${store.place_id}`;
+      const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lng}&destination_place_id=${store.place_id}`;
       
       inlineButtons.push([
         Markup.button.url(`🗺️ Directions: ${store.name.substring(0, 22)}`, navUrl)
@@ -138,50 +138,49 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ An unexpected error occurred. Please try again.`
+      `⚠️ Unable to complete search. Please try again.`
     );
   }
 });
 
-// Helper 1: Category & Intent Classification using Gemini API (with robust model fallback)
+// Helper 1: Category & Intent Classification with Multi-Model Fallbacks
 async function parseProductIntent(userInput) {
-  const modelsToTry = [
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash-002',
-    'gemini-1.5-flash-001',
-    'gemini-2.0-flash',
-    'gemini-1.5-pro-latest'
-  ];
-
   const prompt = `
   You are an e-commerce taxonomy classifier. Analyze this shopping search: "${userInput}".
-  Extract the product name, category, and the best search keyword for local stores on Google Maps.
+  Extract the product name, category, and the best search keyword for local retail stores on Google Maps.
   
-  Return strictly JSON format:
+  Return strictly valid JSON:
   {
     "productName": "string",
     "category": "string",
-    "searchKeyword": "string (e.g. electronics store, hardware shop, pharmacy, stationery)"
+    "searchKeyword": "string (e.g. electronics store, hardware shop, medical pharmacy, stationery)"
   }
   `;
 
-  for (const model of modelsToTry) {
+  const modelEndpoints = [
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`
+  ];
+
+  for (const endpoint of modelEndpoints) {
     try {
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`;
-      const response = await axios.post(geminiUrl, {
+      const response = await axios.post(endpoint, {
         contents: [{ parts: [{ text: prompt }] }],
         generationConfig: { responseMimeType: 'application/json' }
-      });
+      }, { timeout: 6000 });
 
-      const rawText = response.data.candidates[0].content.parts[0].text;
-      return JSON.parse(rawText.trim());
+      const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawText) {
+        return JSON.parse(rawText.trim());
+      }
     } catch (err) {
-      // Continue to next model alias if 404
       continue;
     }
   }
 
-  // Graceful rule-based fallback if all AI models are unreachable
+  // Graceful fallback
   return {
     productName: userInput,
     category: "General Retail",
@@ -189,29 +188,39 @@ async function parseProductIntent(userInput) {
   };
 }
 
-// Helper 2: Google Places Search
+// Helper 2: Google Places API (New) Search
 async function searchNearbyStores(keyword, lat, lng) {
-  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json`;
-  const response = await axios.get(url, {
-    params: {
-      location: `${lat},${lng}`,
-      radius: 5000,
-      keyword: keyword,
-      key: GOOGLE_MAPS_API_KEY
+  const url = `https://places.googleapis.com/v1/places:searchText`;
+
+  const response = await axios.post(
+    url,
+    {
+      textQuery: keyword,
+      locationBias: {
+        circle: {
+          center: {
+            latitude: lat,
+            longitude: lng
+          },
+          radius: 5000.0 // 5 km search radius
+        }
+      },
+      maxResultCount: 5
+    },
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location'
+      },
+      timeout: 8000
     }
-  });
+  );
 
-  if (response.data.status === 'REQUEST_DENIED') {
-    throw new Error(response.data.error_message || 'Google Maps REQUEST_DENIED. Check API key and Billing.');
-  }
-
-  return response.data.results || [];
-}
-
-// Launch Bot
-bot.launch().then(() => {
-  console.log('🚀 LMart Telegram Bot is active and listening...');
-});
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  const places = response.data?.places || [];
+  return places.map((p) => ({
+    name: p.displayName?.text || 'Local Store',
+    formatted_address: p.formattedAddress || 'Address on map',
+    rating: p.rating,
+    user_ratings_total: p.userRatingCount,
+    open_now: p.current
