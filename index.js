@@ -3,7 +3,7 @@ const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// 1. Lightweight Health-Check HTTP Server (Satisfies Render's Port Scan)
+// 1. Lightweight Health-Check HTTP Server
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
   res.end('LMart Telegram Bot is active and healthy!\n');
@@ -15,14 +15,16 @@ server.listen(PORT, () => {
 });
 
 // 2. Validate Bot Token
-if (!process.env.TELEGRAM_BOT_TOKEN) {
+const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').replace(/['"]/g, '').trim();
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || '').replace(/['"]/g, '').trim();
+const GOOGLE_MAPS_API_KEY = (process.env.GOOGLE_MAPS_API_KEY || '').replace(/['"]/g, '').trim();
+
+if (!TELEGRAM_BOT_TOKEN) {
   console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing.');
   process.exit(1);
 }
 
-const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
-
-// In-memory store for user location
+const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const userSessions = new Map();
 
 // Default coordinates fallback (Ichipatti / Tiruppur: 11.0168, 77.2514)
@@ -66,15 +68,37 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent using Gemini REST API
-    const parsedIntent = await parseProductIntent(queryText);
+    // Step A: Parse Intent with Gemini
+    let parsedIntent;
+    try {
+      parsedIntent = await parseProductIntent(queryText);
+    } catch (err) {
+      console.error('Gemini API Error:', err.response?.data || err.message);
+      return ctx.telegram.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        null,
+        `⚠️ Gemini AI Error: ${err.response?.data?.error?.message || err.message}`
+      );
+    }
 
     // Step B: Query Google Places API
-    const stores = await searchNearbyStores(
-      parsedIntent.searchKeyword,
-      session.latitude,
-      session.longitude
-    );
+    let stores;
+    try {
+      stores = await searchNearbyStores(
+        parsedIntent.searchKeyword,
+        session.latitude,
+        session.longitude
+      );
+    } catch (err) {
+      console.error('Google Places API Error:', err.response?.data || err.message);
+      return ctx.telegram.editMessageText(
+        chatId,
+        statusMsg.message_id,
+        null,
+        `⚠️ Google Maps Error: ${err.response?.data?.error_message || err.message}`
+      );
+    }
 
     if (!stores || stores.length === 0) {
       return ctx.telegram.editMessageText(
@@ -85,7 +109,7 @@ bot.on('text', async (ctx) => {
       );
     }
 
-    // Step C: Format Response Card with Directions
+    // Step C: Format Response Card
     let responseText = `🛒 *LMart Stock Finder*\n`;
     responseText += `*Item:* ${parsedIntent.productName}\n`;
     responseText += `*Category:* ${parsedIntent.category}\n\n`;
@@ -120,19 +144,19 @@ bot.on('text', async (ctx) => {
     );
 
   } catch (error) {
-    console.error('Search error:', error);
+    console.error('General Error:', error);
     ctx.telegram.editMessageText(
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ Unable to complete search. Please verify your API keys and try again.`
+      `⚠️ An unexpected error occurred. Check Render logs for details.`
     );
   }
 });
 
 // Helper 1: Category & Intent Classification using Gemini API
 async function parseProductIntent(userInput) {
-  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
 
   const prompt = `
   You are an e-commerce taxonomy classifier. Analyze this shopping search: "${userInput}".
@@ -163,9 +187,13 @@ async function searchNearbyStores(keyword, lat, lng) {
       location: `${lat},${lng}`,
       radius: 5000,
       keyword: keyword,
-      key: process.env.GOOGLE_MAPS_API_KEY
+      key: GOOGLE_MAPS_API_KEY
     }
   });
+
+  if (response.data.status === 'REQUEST_DENIED') {
+    throw new Error(response.data.error_message || 'Google Maps REQUEST_DENIED. Check API key and Billing.');
+  }
 
   return response.data.results || [];
 }
