@@ -6,7 +6,7 @@ const axios = require('axios');
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Multilingual Telegram Bot is active and healthy!\n');
+  res.end('LMart Hyperlocal Bot is active and healthy!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -29,20 +29,33 @@ if (!TELEGRAM_BOT_TOKEN) {
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const userSessions = new Map();
 
-// Default coordinates fallback (Ichipatti / Tiruppur / Palladam: 11.0168, 77.2514)
+// Default coordinates fallback (Ichipatti / Tiruppur / Palladam area: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
-// 3. /start command (Bilingual English + Tamil)
+// Helper: Calculate Exact Distance in Kilometers (Haversine formula)
+function calculateDistanceKm(lat1, lon1, lat2, lon2) {
+  const R = 6371; // Earth radius in km
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+// 3. /start command
 bot.start((ctx) => {
   const welcomeText = 
     `👋 *Welcome to LMart* — Your Hyperlocal AI Shopping Agent!\n` +
-    `*எல்மார்ட்* — உங்கள் அருகிலுள்ள கடைகளில் பொருட்களை கண்டறியும் AI உதவியாளர்!\n\n` +
+    `*எல்மார்ட்* — அருகிலுள்ள கடைகள் & தொலைபேசி எண்களை கண்டறியும் AI உதவியாளர்!\n\n` +
     `Type any item in *English, தமிழ், or Tanglish*:\n` +
-    `• *"Type-C fast charger"*\n` +
-    `• *"பாராசிட்டமால் மாத்திரை"*\n` +
+    `• *"Paracetamol tablet"*\n` +
+    `• *"மொபைல் சார்ஜர்"*\n` +
     `• *"1 inch PVC pipe"*\n\n` +
-    `📍 Please share your location below to search nearest shops.`;
+    `📍 Please share your live location below to find the nearest stores & phone numbers.`;
 
   ctx.reply(welcomeText, {
     parse_mode: 'Markdown',
@@ -77,10 +90,10 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Analyzing item & finding nearest open stores...`);
 
   try {
-    // Step A: Parse Intent with Multilingual Gemini Model
+    // Step A: Parse Intent with Gemini
     const parsed = await parseProductIntent(queryText);
 
-    // Step B: Query Google Places API (New)
+    // Step B: Query Google Places API with strict proximity sorting & phone numbers
     let stores = [];
     try {
       stores = await searchNearbyStores(
@@ -92,7 +105,7 @@ bot.on('text', async (ctx) => {
       console.warn('Google Places API notice:', err.message);
     }
 
-    // Step C: Format Response in User's Language
+    // Step C: Format Response
     const isTamil = parsed.language === 'ta' || parsed.language === 'tanglish';
     
     let responseText = isTamil ? `🛒 *எல்மார்ட் கடை தேடல் (LMart)*\n` : `🛒 *LMart Stock Finder*\n`;
@@ -102,31 +115,42 @@ bot.on('text', async (ctx) => {
     const inlineButtons = [];
 
     if (stores && stores.length > 0) {
-      responseText += isTamil ? `அருகிலுள்ள *${stores.length} கடைகள்*:\n\n` : `Found *${stores.length} nearby stores*:\n\n`;
+      responseText += isTamil 
+        ? `உங்களுக்கு மிக அருகிலுள்ள *${stores.length} கடைகள்* (தூரத்தின்படி):\n\n` 
+        : `Nearest *${stores.length} Stores* (Ranked by Distance):\n\n`;
 
-      stores.slice(0, 3).forEach((store, index) => {
+      stores.slice(0, 4).forEach((store, index) => {
         const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ Verified';
         const openStatus = store.open_now 
           ? (isTamil ? '🟢 இப்போது திறந்துள்ளது' : '🟢 Open Now')
           : (isTamil ? '⚪ திறந்த நிலை அறியப்படவில்லை' : '⚪ Status Unverified');
 
-        const phoneText = store.phone ? `\n📞 \`${store.phone}\`` : '';
+        const distFormatted = store.distanceKm < 1 
+          ? `${Math.round(store.distanceKm * 1000)} m` 
+          : `${store.distanceKm.toFixed(1)} km`;
 
-        responseText += `*${index + 1}. ${store.name}*\n`;
-        responseText += `📍 ${store.formatted_address}\n`;
-        responseText += `${rating} | ${openStatus}${phoneText}\n\n`;
+        // Prominent Phone Number Formatting
+        const phoneFormatted = store.phone 
+          ? `\n📞 *Phone / தொலைபேசி:* \`${store.phone}\`` 
+          : `\n📞 *Phone:* Not listed on Maps`;
+
+        responseText += `*${index + 1}. ${store.name}* (📍 *${distFormatted}*)\n`;
+        responseText += `📌 ${store.formatted_address}\n`;
+        responseText += `${rating} | ${openStatus}${phoneFormatted}\n\n`;
 
         const navUrl = `https://www.google.com/maps/dir/?api=1&destination=${store.lat},${store.lng}&destination_place_id=${store.place_id || ''}`;
-        const dirBtnText = isTamil ? `🗺️ வழிப்பாதை: ${store.name.substring(0, 18)}` : `🗺️ Directions: ${store.name.substring(0, 20)}`;
+        const dirBtnText = isTamil 
+          ? `🗺️ வழிப்பாதை (${distFormatted}): ${store.name.substring(0, 14)}` 
+          : `🗺️ Directions (${distFormatted}): ${store.name.substring(0, 16)}`;
         
         inlineButtons.push([Markup.button.url(dirBtnText, navUrl)]);
       });
     }
 
     // Direct Google Maps Explore button
-    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(parsed.searchKeyword)}/@${session.latitude},${session.longitude},14z`;
+    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(parsed.searchKeyword)}/@${session.latitude},${session.longitude},15z`;
     const exploreText = isTamil 
-      ? `📍 மேப்பில் அனைத்து "${parsed.searchKeyword}" கடைகளையும் பார்க்க` 
+      ? `📍 மேப்பில் அருகிலுள்ள அனைத்து "${parsed.searchKeyword}" பார்க்க` 
       : `📍 Explore all "${parsed.searchKeyword}" on Maps`;
 
     inlineButtons.push([Markup.button.url(exploreText, directSearchUrl)]);
@@ -172,40 +196,39 @@ function safeJsonParse(text) {
   }
 }
 
-// Helper 1: Multilingual & Accurate Category Taxonomy Classifier
+// Helper 1: Multilingual Intent Classifier (Accurate Category Keywords)
 async function parseProductIntent(userInput) {
   const prompt = `
-  You are an expert Indian retail taxonomy classifier.
-  Analyze the user search input: "${userInput}".
+  Analyze this product search for local retail shops in Tamil Nadu: "${userInput}".
   
-  Instructions:
-  1. Detect the language: "en" (English), "ta" (Tamil script), or "tanglish" (Tamil in Latin script, e.g. "kaichal mathirai").
-  2. Extract the canonical product name in English and the localized name in Tamil (if Tamil/Tanglish).
-  3. Classify into one of these exact standardized categories:
-     - 💊 Pharmacy & Healthcare (e.g. medicines, tablets, paracetamol, syrups, medicals)
-     - 🔌 Electronics & Mobile Accessories (e.g. chargers, cables, headphones, power bank)
-     - 🔧 Hardware, Electricals & Plumbing (e.g. PVC pipes, tools, switches, motor capacitors, paint)
-     - 🛒 Supermarket, Provisions & Grocery (e.g. milk, rice, oil, snacks, vegetables)
-     - 📚 Stationery & Xerox (e.g. notebooks, printing, pens, charts)
-     - 🚗 Automobile Spares & Two-Wheeler (e.g. engine oil, bike battery, spares, tyres)
-     - 🍽️ Restaurant & Bakery (e.g. tea, coffee, snacks, cakes)
-  4. Generate the most effective searchKeyword for physical stores in Tamil Nadu on Google Maps (e.g. "Medicals Pharmacy", "Electrical and Hardware store", "Mobile Accessories store").
+  Strict Category Matching Rules:
+  - If medicine / tablets / paracetamol / syrup / ointment / health:
+    -> category: "💊 Pharmacy & Healthcare"
+    -> searchKeyword: "Medicals Pharmacy chemist மருந்தகம்"
+  - If mobile accessories / charger / cable / headset:
+    -> category: "🔌 Electronics & Mobile Accessories"
+    -> searchKeyword: "Mobile store accessories electronics"
+  - If hardware / plumbing / pipes / tools / electricals / capacitor:
+    -> category: "🔧 Hardware, Electricals & Plumbing"
+    -> searchKeyword: "Electrical and hardware store"
+  - If provisions / grocery / milk / rice / snacks:
+    -> category: "🛒 Supermarket & Grocery"
+    -> searchKeyword: "Supermarket grocery store"
   
   Return strictly valid JSON:
   {
     "language": "en" | "ta" | "tanglish",
     "productName": "English Name",
-    "localizedName": "Tamil/Localized Name",
-    "category": "Standardized Category with Emoji",
-    "searchKeyword": "Google Maps search query"
+    "localizedName": "Tamil Name",
+    "category": "Category with Emoji",
+    "searchKeyword": "Search Query"
   }
   `;
 
-  if (GEMINI_API_KEY) {
+  if (GEMINI_API_KEY && !GEMINI_API_KEY.startsWith('http')) {
     const modelEndpoints = [
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
     ];
 
     for (const endpoint of modelEndpoints) {
@@ -230,19 +253,18 @@ async function parseProductIntent(userInput) {
     }
   }
 
-  // Fallback
   return {
     language: "en",
     productName: userInput,
     localizedName: userInput,
     category: "🛒 General Retail",
-    searchKeyword: `${userInput} shop`
+    searchKeyword: `${userInput} store`
   };
 }
 
-// Helper 2: Google Places API (New) with Phone Number Support
+// Helper 2: Google Places Search (Strict Proximity with Phone Numbers)
 async function searchNearbyStores(keyword, lat, lng) {
-  if (!GOOGLE_MAPS_API_KEY) {
+  if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.startsWith('http')) {
     return [];
   }
 
@@ -250,10 +272,9 @@ async function searchNearbyStores(keyword, lat, lng) {
   const validLng = Number(lng) || DEFAULT_LNG;
   const url = `https://places.googleapis.com/v1/places:searchText`;
 
-  const response = await axios({
-    method: 'post',
-    url: url,
-    data: {
+  const response = await axios.post(
+    url,
+    {
       textQuery: String(keyword || 'store').trim(),
       locationBias: {
         circle: {
@@ -261,36 +282,51 @@ async function searchNearbyStores(keyword, lat, lng) {
             latitude: validLat,
             longitude: validLng
           },
-          radius: 5000.0 // 5 km search radius
+          radius: 3500.0 // 3.5 km strict local radius
         }
       },
-      maxResultCount: 5
+      maxResultCount: 8
     },
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber'
-    },
-    timeout: 7000
-  });
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
+        'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber'
+      },
+      timeout: 6000
+    }
+  );
 
   const places = response.data?.places || [];
-  return places.map((p) => ({
-    name: p.displayName?.text || 'Local Store',
-    formatted_address: p.formattedAddress || 'Address on map',
-    rating: p.rating,
-    user_ratings_total: p.userRatingCount,
-    open_now: p.currentOpeningHours?.openNow,
-    phone: p.nationalPhoneNumber || '',
-    lat: p.location?.latitude || validLat,
-    lng: p.location?.longitude || validLng,
-    place_id: p.id || ''
-  }));
+  
+  const storesWithDistance = places.map((p) => {
+    const pLat = p.location?.latitude || validLat;
+    const pLng = p.location?.longitude || validLng;
+    const dist = calculateDistanceKm(validLat, validLng, pLat, pLng);
+
+    return {
+      name: p.displayName?.text || 'Local Store',
+      formatted_address: p.formattedAddress || 'Nearby',
+      rating: p.rating,
+      user_ratings_total: p.userRatingCount,
+      open_now: p.currentOpeningHours?.openNow,
+      phone: p.nationalPhoneNumber || p.internationalPhoneNumber || '',
+      lat: pLat,
+      lng: pLng,
+      distanceKm: dist,
+      place_id: p.id || ''
+    };
+  });
+
+  // Strict sorting: Closest stores appear first (e.g. 300m -> 800m -> 1.5km)
+  storesWithDistance.sort((a, b) => a.distanceKm - b.distanceKm);
+
+  return storesWithDistance;
 }
 
 // Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart Multilingual Bot is running...');
+  console.log('🚀 LMart Hyperlocal Proximity Bot is active...');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
