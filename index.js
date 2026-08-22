@@ -29,13 +29,13 @@ if (!TELEGRAM_BOT_TOKEN) {
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const userSessions = new Map();
 
-// Default coordinates fallback (Ichipatti / Tiruppur / Palladam area: 11.0168, 77.2514)
+// Default coordinates fallback (Ichipatti / Karugampalayam area: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
 // Helper: Calculate Exact Distance in Kilometers (Haversine formula)
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth radius in km
+  const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -90,10 +90,10 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🔍 Finding nearest verified shops in your neighborhood...`);
 
   try {
-    // Step A: Parse Intent with Gemini (Extracts Place Type & Clean Keywords)
+    // Step A: Parse Intent with Fast Rule-Engine + Gemini Fallback
     const parsed = await parseProductIntent(queryText);
 
-    // Step B: Query Google Places using Native Type Search + Proximity Distance
+    // Step B: Query Google Places using Strict Type Filtering
     let stores = [];
     try {
       stores = await searchHyperlocalStores(
@@ -117,8 +117,8 @@ bot.on('text', async (ctx) => {
 
     if (stores && stores.length > 0) {
       responseText += isTamil 
-        ? `உங்களுக்கு மிக அருகிலுள்ள *${stores.length} கடைகள்* (தூரத்தின்படி):\n\n` 
-        : `Nearest *${stores.length} Medicals / Stores* (Ranked by Distance):\n\n`;
+        ? `உங்களுக்கு மிக அருகிலுள்ள *${stores.length} மருந்தகங்கள்/கடைகள்* (தூரத்தின்படி):\n\n` 
+        : `Nearest *${stores.length} Medicals / Pharmacies* (Ranked by Distance):\n\n`;
 
       stores.slice(0, 4).forEach((store, index) => {
         const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ Verified';
@@ -145,6 +145,8 @@ bot.on('text', async (ctx) => {
         
         inlineButtons.push([Markup.button.url(dirBtnText, navUrl)]);
       });
+    } else {
+      responseText += `📍 No specific medical shops found within 5 km. Tap below to search Google Maps directly:`;
     }
 
     // Direct Google Maps Explore button
@@ -196,79 +198,104 @@ function safeJsonParse(text) {
   }
 }
 
-// Helper 1: Multilingual Intent Classifier with Clean Google Place Types
+// Helper 1: Fast Rule-Engine + Gemini AI Taxonomy Classifier
 async function parseProductIntent(userInput) {
-  const prompt = `
-  Analyze this shopping search for local shops in Tamil Nadu: "${userInput}".
-  
-  Map to one of these types:
-  1. Medicines/Tablets/Syrup/Paracetamol:
-     - category: "💊 Pharmacy & Healthcare"
-     - placeTypes: ["pharmacy", "drugstore"]
-     - cleanQuery: "medical shop"
-  2. Mobile/Charger/Earphones/Electronics:
-     - category: "🔌 Electronics & Mobile Accessories"
-     - placeTypes: ["electronics_store", "cell_phone_store"]
-     - cleanQuery: "mobile shop"
-  3. Hardware/PVC Pipes/Wires/Capacitors/Tools:
-     - category: "🔧 Hardware & Electricals"
-     - placeTypes: ["hardware_store", "electrical_supply_store"]
-     - cleanQuery: "hardware electricals"
-  4. Supermarket/Grocery/Milk/Snacks:
-     - category: "🛒 Supermarket & Grocery"
-     - placeTypes: ["grocery_store", "supermarket"]
-     - cleanQuery: "grocery supermarket"
-  
-  Return strictly valid JSON:
-  {
-    "language": "en" | "ta" | "tanglish",
-    "productName": "Clean Product Name",
-    "localizedName": "Tamil Name",
-    "category": "Category with Emoji",
-    "placeTypes": ["string"],
-    "cleanQuery": "simple search term"
+  const text = userInput.toLowerCase();
+
+  // 1. Instant Rule-Based Matching for Medicines & Healthcare
+  if (/(paracetamol|tablet|medicine|syrup|ointment|dollo|dolo|crocin|medical|pharmacy|chemist|மாத்திரை|மருந்து|மருந்தகம்|kaichal|fever|bandaid|bandage|ointment|pain)/i.test(text)) {
+    return {
+      language: /[\u0B80-\u0BFF]/.test(userInput) ? "ta" : (/(kaichal|marunthu|mathirai)/i.test(text) ? "tanglish" : "en"),
+      productName: userInput,
+      localizedName: userInput,
+      category: "💊 Pharmacy & Healthcare",
+      placeTypes: ["pharmacy", "drugstore"],
+      cleanQuery: "medical shop pharmacy"
+    };
   }
-  `;
 
+  // 2. Instant Rule-Based Matching for Electronics & Mobile Accessories
+  if (/(charger|cable|usb|type-c|adapter|earphone|headphone|mobile|phone|battery|powerbank|சார்ஜர்|ஹெட்போன்)/i.test(text)) {
+    return {
+      language: /[\u0B80-\u0BFF]/.test(userInput) ? "ta" : "en",
+      productName: userInput,
+      localizedName: userInput,
+      category: "🔌 Electronics & Mobile Accessories",
+      placeTypes: ["cell_phone_store", "electronics_store"],
+      cleanQuery: "mobile accessories shop"
+    };
+  }
+
+  // 3. Instant Rule-Based Matching for Hardware & Plumbing
+  if (/(pipe|pvc|wire|switch|motor|capacitor|drill|screw|cement|paint|hardware|electrical|valve|drilling)/i.test(text)) {
+    return {
+      language: /[\u0B80-\u0BFF]/.test(userInput) ? "ta" : "en",
+      productName: userInput,
+      localizedName: userInput,
+      category: "🔧 Hardware & Electricals",
+      placeTypes: ["hardware_store", "electrical_supply_store"],
+      cleanQuery: "electrical hardware store"
+    };
+  }
+
+  // 4. Instant Rule-Based Matching for Supermarket & Grocery
+  if (/(milk|rice|oil|biscuit|snack|grocery|supermarket|vegetable|fruit|மளிகை|பால்)/i.test(text)) {
+    return {
+      language: /[\u0B80-\u0BFF]/.test(userInput) ? "ta" : "en",
+      productName: userInput,
+      localizedName: userInput,
+      category: "🛒 Supermarket & Grocery",
+      placeTypes: ["supermarket", "grocery_store"],
+      cleanQuery: "grocery supermarket"
+    };
+  }
+
+  // Gemini AI Fallback for complex/unmatched inputs
   if (GEMINI_API_KEY && !GEMINI_API_KEY.startsWith('http')) {
-    const modelEndpoints = [
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
-    ];
+    const prompt = `
+    Analyze this shopping search for Tamil Nadu: "${userInput}".
+    Classify into exact category: 💊 Pharmacy & Healthcare, 🔌 Electronics, 🔧 Hardware, or 🛒 Supermarket.
+    Return JSON:
+    {
+      "language": "en" | "ta" | "tanglish",
+      "productName": "Clean Name",
+      "category": "Category with Emoji",
+      "placeTypes": ["pharmacy"] or ["electronics_store"] or ["hardware_store"] or ["grocery_store"],
+      "cleanQuery": "simple search term"
+    }
+    `;
 
-    for (const endpoint of modelEndpoints) {
-      try {
-        const response = await axios.post(
-          endpoint,
-          {
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json' }
-          },
-          { timeout: 5000 }
-        );
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+        {
+          contents: [{ parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json' }
+        },
+        { timeout: 4000 }
+      );
 
-        const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        const parsed = safeJsonParse(rawText);
-        if (parsed && parsed.category && parsed.cleanQuery) {
-          return parsed;
-        }
-      } catch (err) {
-        continue;
+      const parsed = safeJsonParse(response.data?.candidates?.[0]?.content?.parts?.[0]?.text);
+      if (parsed && parsed.category && parsed.placeTypes) {
+        return parsed;
       }
+    } catch (err) {
+      console.warn('Gemini fallback failed:', err.message);
     }
   }
 
+  // Safe Default
   return {
     language: "en",
     productName: userInput,
     localizedName: userInput,
     category: "🛒 General Retail",
-    placeTypes: ["store"],
-    cleanQuery: `${userInput} shop`
+    placeTypes: ["grocery_store"],
+    cleanQuery: `${userInput} store`
   };
 }
 
-// Helper 2: Google Places Search (Native SearchNearby + Distance Ranking)
+// Helper 2: Strict Hyperlocal Google Places Search
 async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
   if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.startsWith('http')) {
     return [];
@@ -284,13 +311,13 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
   let places = [];
 
-  // Primary Search: Google's Native searchNearby (Strict Distance Sorting)
+  // Strategy A: searchNearby with strict Google Place Type (e.g. pharmacy only)
   try {
     const nearbyUrl = `https://places.googleapis.com/v1/places:searchNearby`;
     const response = await axios.post(
       nearbyUrl,
       {
-        includedTypes: (placeTypes && placeTypes.length > 0) ? placeTypes : ["pharmacy"],
+        includedTypes: placeTypes,
         locationRestriction: {
           circle: {
             center: { latitude: validLat, longitude: validLng },
@@ -304,17 +331,17 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
     );
     places = response.data?.places || [];
   } catch (e) {
-    console.warn("searchNearby attempt failed, falling back to searchText:", e.message);
+    console.warn("searchNearby by types error:", e.message);
   }
 
-  // Fallback Search: searchText with clean natural query (e.g. "medical shop")
+  // Strategy B: Fallback to searchText with exact query (e.g. "medical shop")
   if (!places || places.length === 0) {
     try {
       const textUrl = `https://places.googleapis.com/v1/places:searchText`;
       const response = await axios.post(
         textUrl,
         {
-          textQuery: String(cleanQuery || 'medical shop').trim(),
+          textQuery: String(cleanQuery || 'medical shop pharmacy').trim(),
           locationBias: {
             circle: {
               center: { latitude: validLat, longitude: validLng },
@@ -331,14 +358,14 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
     }
   }
 
-  // Map and calculate exact physical distance
+  // Map and calculate distance
   const storesWithDistance = places.map((p) => {
     const pLat = p.location?.latitude || validLat;
     const pLng = p.location?.longitude || validLng;
     const dist = calculateDistanceKm(validLat, validLng, pLat, pLng);
 
     return {
-      name: p.displayName?.text || 'Local Store',
+      name: p.displayName?.text || 'Local Medicals',
       formatted_address: p.formattedAddress || 'Nearby',
       rating: p.rating,
       user_ratings_total: p.userRatingCount,
@@ -359,7 +386,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
 // Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart Hyperlocal Proximity Bot is active...');
+  console.log('🚀 LMart Hyperlocal Bot is running...');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
