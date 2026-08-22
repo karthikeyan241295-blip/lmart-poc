@@ -2,12 +2,11 @@ require('dotenv').config();
 const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
-const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Official Gemini SDK Bot is active!\n');
+  res.end('LMart Official Agentic AI Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -28,10 +27,6 @@ if (!TELEGRAM_BOT_TOKEN) {
 }
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
-
-// Initialize Gemini with standard v1 API Version to avoid v1beta 404s
-const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-
 const userSessions = new Map();
 
 // Global Error Handler for Telegraf
@@ -43,7 +38,7 @@ bot.catch((err, ctx) => {
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
-// Helper: Escape HTML special characters to prevent Telegram parse crashes
+// Helper: Escape HTML characters to prevent Telegram parse errors
 function escapeHtml(str) {
   if (!str) return '';
   return String(str)
@@ -55,7 +50,7 @@ function escapeHtml(str) {
 
 // Helper: Haversine distance formula
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth radius in km
+  const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -65,7 +60,7 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-// Helper: Safe JSON string parser fallback
+// Helper: Safe JSON parser
 function safeParseJson(raw) {
   if (!raw) return null;
   const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -173,7 +168,7 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ AI Error: ${escapeHtml(err.message)}\nPlease check your API key & try again.`
+      `⚠️ AI Error: ${escapeHtml(err.message)}\nPlease try again in a moment.`
     );
   }
 });
@@ -273,7 +268,7 @@ bot.action('cancel_search', async (ctx) => {
   await ctx.editMessageText('❌ Search cancelled. Send another product name anytime!');
 });
 
-// 7. Autonomous Agentic Reasoner Powered by Gemini Structured CoT
+// 7. Autonomous Agentic Reasoner Powered by Direct REST with CoT
 async function runAIAgent(userInput) {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not configured in environment.');
@@ -299,86 +294,64 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
 3. Store Type & Google Place Types Alignment:
    - Map strictly to matching Google Places API v1 types.
    - Formulate clean 2-3 word natural search terms optimized for Google Places Text Search.
+
+Return strictly valid JSON in this exact structure:
+{
+  "reasoning": {
+    "intentAnalysis": "Step 1 reasoning string",
+    "marketStockLocation": "Step 2 reasoning string",
+    "targetStrategy": "Step 3 reasoning string"
+  },
+  "language": "en" | "ta" | "tanglish",
+  "productName": "string",
+  "localizedName": "string",
+  "category": "string",
+  "headingLabel": "string",
+  "headingLabelTamil": "string",
+  "placeTypes": ["string"],
+  "cleanQuery": "string"
+}
 `;
 
-  const jsonSchema = {
-    type: SchemaType.OBJECT,
-    properties: {
-      reasoning: {
-        type: SchemaType.OBJECT,
-        properties: {
-          intentAnalysis: { 
-            type: SchemaType.STRING, 
-            description: "Step 1: Breakdown of user input and canonical product identification." 
-          },
-          marketStockLocation: { 
-            type: SchemaType.STRING, 
-            description: "Step 2: Reasoning on where this specific product is sold in an Indian physical market." 
-          },
-          targetStrategy: { 
-            type: SchemaType.STRING, 
-            description: "Step 3: Justification for selected Google Places types and search query." 
-          }
-        },
-        required: ["intentAnalysis", "marketStockLocation", "targetStrategy"]
-      },
-      language: { type: SchemaType.STRING, enum: ["en", "ta", "tanglish"] },
-      productName: { type: SchemaType.STRING },
-      localizedName: { type: SchemaType.STRING },
-      category: { type: SchemaType.STRING },
-      headingLabel: { type: SchemaType.STRING },
-      headingLabelTamil: { type: SchemaType.STRING },
-      placeTypes: {
-        type: SchemaType.ARRAY,
-        items: { type: SchemaType.STRING }
-      },
-      cleanQuery: { type: SchemaType.STRING }
-    },
-    required: [
-      "reasoning",
-      "language",
-      "productName",
-      "localizedName",
-      "category",
-      "headingLabel",
-      "headingLabelTamil",
-      "placeTypes",
-      "cleanQuery"
-    ]
-  };
-
-  // Primary model sequence (covers 2.5, 2.0, and 1.5 variants)
-  const modelsToTry = [
+  // Fallback list of active Flash models
+  const candidateModels = [
     'gemini-2.5-flash',
     'gemini-2.0-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash'
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-latest'
   ];
 
   let lastError = null;
 
-  for (const modelName of modelsToTry) {
+  for (const modelName of candidateModels) {
     try {
-      const model = genAI.getGenerativeModel(
-        {
-          model: modelName,
-          systemInstruction,
-          generationConfig: {
-            responseMimeType: 'application/json',
-            responseSchema: jsonSchema,
-            temperature: 0.1
-          }
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
+      
+      const payload = {
+        systemInstruction: {
+          parts: [{ text: systemInstruction }]
         },
-        { apiVersion: 'v1' } // Force stable v1 endpoint
-      );
+        contents: [
+          {
+            parts: [{ text: `Perform multi-step agent reasoning for this item search: "${userInput}"` }]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.1
+        }
+      };
 
-      const prompt = `Perform multi-step agent reasoning for this item search: "${userInput}"`;
-      const result = await model.generateContent(prompt);
-      const rawText = result.response.text();
+      const res = await axios.post(url, payload, {
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 10000
+      });
+
+      const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       const decision = safeParseJson(rawText);
 
-      if (decision && decision.category && decision.placeTypes) {
-        console.log(`✅ Gemini success using model: ${modelName}`);
+      if (decision && decision.category && decision.placeTypes && decision.placeTypes.length > 0) {
+        console.log(`✅ Gemini active on: ${modelName}`);
         console.log('🤖 [Agentic CoT Analysis]:');
         console.log(` ↳ Intent: ${decision.reasoning?.intentAnalysis}`);
         console.log(` ↳ Market Logic: ${decision.reasoning?.marketStockLocation}`);
@@ -386,12 +359,13 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
         return decision;
       }
     } catch (err) {
-      console.warn(`⚠️ Model ${modelName} attempt notice: ${err.message}`);
-      lastError = err;
+      const apiErrMsg = err.response?.data?.error?.message || err.message;
+      console.warn(`⚠️ Model attempt on ${modelName} failed: ${apiErrMsg}`);
+      lastError = apiErrMsg;
     }
   }
 
-  throw new Error(`AI Agent reasoning failed: ${lastError?.message || 'Check GEMINI_API_KEY validity'}`);
+  throw new Error(`AI Agent reasoning failed: ${lastError}. Make sure "Generative Language API" is enabled in your Google Cloud / AI Studio project.`);
 }
 
 // 8. Hyperlocal Google Places API Search
@@ -408,7 +382,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
   let places = [];
 
-  // Strategy A: searchNearby using AI's exact Place Types (Distance Ranked)
+  // Strategy A: searchNearby using AI's exact Place Types
   if (placeTypes && placeTypes.length > 0) {
     try {
       const response = await axios.post(
@@ -428,11 +402,11 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
       );
       places = response.data?.places || [];
     } catch (e) {
-      console.warn("searchNearby error:", e.message);
+      console.warn("searchNearby notice:", e.message);
     }
   }
 
-  // Strategy B: Fallback to searchText with AI's clean query
+  // Strategy B: Fallback to searchText with clean query
   if (!places || places.length === 0) {
     try {
       const response = await axios.post(
@@ -451,11 +425,11 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
       );
       places = response.data?.places || [];
     } catch (e) {
-      console.warn("searchText fallback error:", e.message);
+      console.warn("searchText fallback notice:", e.message);
     }
   }
 
-  // Calculate physical distance & sort closest first
+  // Calculate physical distance & sort
   const storesWithDistance = places.map((p) => {
     const pLat = p.location?.latitude || validLat;
     const pLng = p.location?.longitude || validLng;
@@ -481,7 +455,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
 // 9. Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart Official Gemini SDK Bot is active...');
+  console.log('🚀 LMart Official Agentic AI Bot is active...');
 });
 
 // 10. Clean Graceful Shutdown
