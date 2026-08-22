@@ -6,7 +6,7 @@ const axios = require('axios');
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Auto-Model Discovery AI Bot is active!\n');
+  res.end('LMart Dynamic AI Model Discovery Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -33,12 +33,12 @@ const userSessions = new Map();
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
-// Cache active Gemini model name
-let activeGeminiModel = null;
+// Cache active Gemini model
+let cachedGeminiModelName = null;
 
 // Helper: Calculate Exact Distance in Kilometers (Haversine formula)
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
+  const R = 6371; // Earth radius in km
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -140,7 +140,7 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ AI Error: ${err.message}\nMake sure Generative Language API is enabled for your GEMINI_API_KEY.`
+      `⚠️ AI Error: ${err.message}\nMake sure your GEMINI_API_KEY from aistudio.google.com is active.`
     );
   }
 });
@@ -256,33 +256,34 @@ function safeJsonParse(text) {
   }
 }
 
-// 🔍 Helper: Automatically Discover the Working Gemini Model for Your Account
+// 🔍 Helper: Automatically discover working models for your API key from v1beta
 async function discoverWorkingGeminiModel() {
-  if (activeGeminiModel) return activeGeminiModel;
+  if (cachedGeminiModelName) return cachedGeminiModelName;
 
   try {
-    const listRes = await axios.get(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      { timeout: 5000 }
-    );
+    const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+    const listRes = await axios.get(listUrl, { timeout: 6000 });
     const models = listRes.data?.models || [];
-    const supported = models.find(m => 
-      m.supportedGenerationMethods?.includes('generateContent') && 
-      (m.name.includes('flash') || m.name.includes('gemini'))
+    
+    // Find the first model that supports generateContent
+    const match = models.find(m => 
+      m.supportedGenerationMethods?.includes('generateContent') &&
+      (m.name.includes('flash') || m.name.includes('gemini-2') || m.name.includes('gemini-1.5') || m.name.includes('gemini-pro'))
     );
-    if (supported) {
-      activeGeminiModel = supported.name.replace('models/', '');
-      console.log(`✅ Automatically Selected Active Gemini Model: ${activeGeminiModel}`);
-      return activeGeminiModel;
+
+    if (match) {
+      cachedGeminiModelName = match.name; // e.g. "models/gemini-1.5-flash-latest"
+      console.log(`✅ Auto-discovered active Gemini model: ${cachedGeminiModelName}`);
+      return cachedGeminiModelName;
     }
   } catch (e) {
-    console.warn('Model list auto-discovery failed, using fallback list:', e.message);
+    console.warn('Model list discovery error:', e.message);
   }
 
-  return 'gemini-1.5-flash-latest';
+  return 'models/gemini-1.5-flash-latest';
 }
 
-// 🧠 Autonomous AI Agent with Dynamic Model Discovery
+// 🧠 Autonomous AI Agent (Strict Reasoning via v1beta)
 async function runAIAgent(userInput) {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not configured in Render Environment Variables.');
@@ -319,39 +320,28 @@ async function runAIAgent(userInput) {
   }
   `;
 
-  // Auto-discover model or try supported list
-  const discovered = await discoverWorkingGeminiModel();
-  const modelsToTry = [discovered, 'gemini-1.5-flash-latest', 'gemini-1.5-flash-002', 'gemini-2.0-flash', 'gemini-1.5-pro'];
+  // Auto-discover model name
+  const modelName = await discoverWorkingGeminiModel();
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
-  let lastError = null;
-
-  for (const model of modelsToTry) {
-    try {
-      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-      const response = await axios.post(
-        endpoint,
-        {
-          contents: [{ parts: [{ text: prompt }] }]
-        },
-        {
-          headers: { 'Content-Type': 'application/json' },
-          timeout: 8000
-        }
-      );
-
-      const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      const parsed = safeJsonParse(rawText);
-      if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
-        activeGeminiModel = model; // Cache working model
-        return parsed;
-      }
-    } catch (err) {
-      lastError = err;
-      console.warn(`Model ${model} attempt failed: ${err.message}`);
+  const response = await axios.post(
+    endpoint,
+    {
+      contents: [{ parts: [{ text: prompt }] }]
+    },
+    {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 9000
     }
+  );
+
+  const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const parsed = safeJsonParse(rawText);
+  if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
+    return parsed;
   }
 
-  throw new Error(`AI Classification failed: ${lastError?.response?.data?.error?.message || lastError?.message || 'Check Gemini API Key'}`);
+  throw new Error('AI returned an invalid response structure. Please try again.');
 }
 
 // Helper: Hyperlocal Google Places Search
