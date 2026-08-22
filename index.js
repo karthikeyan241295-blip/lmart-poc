@@ -223,7 +223,7 @@ bot.on('text', async (ctx) => {
   }
 });
 
-// 6. STEP 2: User Confirms -> Queries Google Places API v1
+// 6. STEP 2: User Confirms -> Queries Google Places API v1 with Retail Filtering
 bot.action('confirm_search', async (ctx) => {
   const chatId = ctx.chat.id;
   const session = userSessions.get(chatId);
@@ -236,7 +236,7 @@ bot.action('confirm_search', async (ctx) => {
   const isTamil = aiDecision.language === 'ta' || aiDecision.language === 'tanglish';
 
   await ctx.answerCbQuery();
-  await ctx.editMessageText(`🔍 Finding nearest <b>${escapeHtml(aiDecision.headingLabel)}</b> within 5 km...`, { parse_mode: 'HTML' });
+  await ctx.editMessageText(`🔍 Finding verified <b>${escapeHtml(aiDecision.headingLabel)}</b> near you...`, { parse_mode: 'HTML' });
 
   try {
     const stores = await searchHyperlocalStores(
@@ -259,12 +259,12 @@ bot.action('confirm_search', async (ctx) => {
     if (stores && stores.length > 0) {
       const headingText = isTamil
         ? `உங்களுக்கு மிக அருகிலுள்ள <b>${stores.length} ${escapeHtml(aiDecision.headingLabelTamil || 'கடைகள்')}</b>:\n\n`
-        : `Nearest <b>${stores.length} ${escapeHtml(aiDecision.headingLabel)}</b> (Ranked by Proximity):\n\n`;
+        : `Nearest <b>${stores.length} Verified ${escapeHtml(aiDecision.headingLabel)}</b>:\n\n`;
 
       responseText += headingText;
 
       stores.slice(0, 4).forEach((store, index) => {
-        const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ Verified';
+        const rating = store.rating ? `⭐ ${store.rating} (${store.user_ratings_total || 0})` : '⭐ Verified Retailer';
         const openStatus = store.open_now 
           ? (isTamil ? '🟢 இப்போது திறந்துள்ளது' : '🟢 Open Now')
           : (isTamil ? '⚪ நிலை அறியப்படவில்லை' : '⚪ Status Unverified');
@@ -291,10 +291,10 @@ bot.action('confirm_search', async (ctx) => {
     } else {
       responseText += isTamil
         ? `📍 அருகிலுள்ள குறிப்பிட்ட கடைகள் கிடைக்கவில்லை. கூகிள் மேப்பில் பார்க்க கீழே தொடவும்:`
-        : `📍 No matching ${escapeHtml(aiDecision.headingLabel)} found within 5 km. Tap below to explore Google Maps:`;
+        : `📍 No verified physical retail stores found within 5 km. Tap below to explore Google Maps:`;
     }
 
-    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(aiDecision.cleanQuery)}/@${session.latitude},${session.longitude},15z`;
+    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(aiDecision.cleanQuery + ' store')}/@${session.latitude},${session.longitude},15z`;
     const exploreText = isTamil 
       ? `📍 மேப்பில் அனைத்து "${escapeHtml(aiDecision.cleanQuery)}" பார்க்க` 
       : `📍 Explore all "${escapeHtml(aiDecision.cleanQuery)}" on Maps`;
@@ -332,20 +332,19 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
 
 ### Agentic Cognitive Process:
 1. Analyze Language & Entity:
-   - Detect if the input is English, Tamil script, or Tanglish (e.g., "oru dolo kudu", "kannadi frame", "mookuthi", "palam", "pipe").
+   - Detect if the input is English, Tamil script, or Tanglish.
    - Extract canonical product and resolve brand names or colloquial terms (e.g., "Dolo" -> Paracetamol, "Fevikwik" -> Instant Adhesive, "1 inch CPVC" -> Plumbing Pipe).
 2. Retail Context Reasoning (Indian Market Dynamics):
-   - Identify where this item is typically bought in tier-2/3 Indian towns and cities:
-     * Hardware / Electrical Stores: PVC/CPVC pipes, wires, switchboards, tools, adhesives, paints.
-     * Pharmacies / Medical Shops: Prescription drugs, OTC meds, baby formula, sanitary pads, thermometers.
-     * Bakeries / Sweet Stalls: Fresh birthday cakes, eggless pastries, snacks, puffs, tea/coffee.
-     * Fancy & Stationery Stores: School supplies, cosmetics, hair accessories, gifts.
-     * Provisional / Kirana / Supermarket: Spices, groceries, cleaning supplies, cooking oil.
-     * Automobile / Spares / Tyre Shops: Bike/car engine oil, brake cables, puncture repair, spare parts.
-     * Electronics & Mobile Shops: Fast chargers, tempered glass, cables, adapters, earphone repairs.
-3. Store Type & Google Place Types Alignment:
-   - Map strictly to matching Google Places API v1 types.
-   - Formulate clean 2-3 word natural search terms optimized for Google Places Text Search.
+   - Focus on physical RETAIL SHOPS with walk-in counters, not individual contractors or factories:
+     * Hardware / Electrical Stores: PVC/CPVC pipes, sanitaryware, wires, switchboards, tools, paints.
+     * Pharmacies / Medical Shops: Prescription drugs, OTC meds, baby care, sanitizers.
+     * Bakeries / Sweet Stalls: Birthday cakes, pastries, snacks, tea.
+     * Stationery & Fancy Stores: Notebooks, pens, cosmetics, gifts.
+     * Provision / Kirana Stores: Groceries, spices, cooking oils.
+     * Automobile Spares / Tyre Shops: Bike/car spares, lubricants, helmets.
+     * Mobile & Electronics: Cables, fast chargers, earphones, gadgets.
+3. Search Query Formulation:
+   - "cleanQuery" MUST contain explicit retail words like "hardware plumbing electrical store", "medical shop pharmacy", "bakery cake shop", "mobile accessories shop".
 
 Return strictly valid JSON in this exact structure:
 {
@@ -401,13 +400,13 @@ Return strictly valid JSON in this exact structure:
     }
     throw new Error('Invalid JSON structure returned by model');
   } catch (err) {
-    discoveredActiveModel = null; // Invalidate cached model to re-scan on next failure
+    discoveredActiveModel = null;
     const apiErrMsg = err.response?.data?.error?.message || err.message;
     throw new Error(apiErrMsg);
   }
 }
 
-// 8. Hyperlocal Google Places API Search
+// 8. Hyperlocal Google Places API Search with Retail & Non-Store Filtering
 async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
   if (!GOOGLE_MAPS_API_KEY) return [];
 
@@ -416,13 +415,35 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
   const headers = {
     'Content-Type': 'application/json',
     'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-    'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber'
+    'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber,places.types,places.primaryType'
   };
 
-  let places = [];
+  let rawPlaces = [];
 
-  // Strategy A: searchNearby using AI's exact Place Types
-  if (placeTypes && placeTypes.length > 0) {
+  // Strategy A: Targeted text search with explicit retail shop context
+  try {
+    const textQuery = `${cleanQuery} store shop`.trim();
+    const response = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      {
+        textQuery,
+        locationBias: {
+          circle: {
+            center: { latitude: validLat, longitude: validLng },
+            radius: 5000.0
+          }
+        },
+        maxResultCount: 15
+      },
+      { headers, timeout: 6000 }
+    );
+    rawPlaces = response.data?.places || [];
+  } catch (e) {
+    console.warn("searchText notice:", e.message);
+  }
+
+  // Strategy B: searchNearby fallback if text search yielded insufficient results
+  if (rawPlaces.length < 4 && placeTypes && placeTypes.length > 0) {
     try {
       const response = await axios.post(
         'https://places.googleapis.com/v1/places:searchNearby',
@@ -431,45 +452,60 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
           locationRestriction: {
             circle: {
               center: { latitude: validLat, longitude: validLng },
-              radius: 5000.0 // 5 km search boundary
+              radius: 5000.0
             }
           },
           rankPreference: "DISTANCE",
-          maxResultCount: 8
+          maxResultCount: 15
         },
         { headers, timeout: 6000 }
       );
-      places = response.data?.places || [];
+      const nearbyPlaces = response.data?.places || [];
+      // Merge unique places
+      const existingIds = new Set(rawPlaces.map(p => p.id));
+      for (const np of nearbyPlaces) {
+        if (!existingIds.has(np.id)) {
+          rawPlaces.push(np);
+        }
+      }
     } catch (e) {
       console.warn("searchNearby notice:", e.message);
     }
   }
 
-  // Strategy B: Fallback to searchText with clean query
-  if (!places || places.length === 0) {
-    try {
-      const response = await axios.post(
-        'https://places.googleapis.com/v1/places:searchText',
-        {
-          textQuery: String(cleanQuery || 'store').trim(),
-          locationBias: {
-            circle: {
-              center: { latitude: validLat, longitude: validLng },
-              radius: 5000.0
-            }
-          },
-          maxResultCount: 8
-        },
-        { headers, timeout: 6000 }
-      );
-      places = response.data?.places || [];
-    } catch (e) {
-      console.warn("searchText fallback notice:", e.message);
-    }
-  }
+  // Strict Negative Keyword Filter (excludes individual persons, manufacturing plants, precast, creations)
+  const blacklistPatterns = [
+    /\b(works|work|fabrication|precast|cement works|hollow blocks|creations|contractor|technician|service center|service centre|repair shop|consultancy|enterprises pvt|factory|foundry|spinning mill|mills|textiles mill|godown|warehouse)\b/i,
+    /^(mr\.|dr\.|er\.)/i,
+    /(ஒர்க்ஸ்|ஒர்க்|ஃபேப்ரிகேஷன்|சிமெண்ட் ஒர்க்ஸ்|ப்ளாக்ஸ்|மில்)/i
+  ];
 
-  // Calculate physical distance & sort
-  const storesWithDistance = places.map((p) => {
+  // Positive Retail Signals
+  const retailPatterns = [
+    /\b(hardware|hardwares|electrical|electricals|plumbing|sanitary|sanitaryware|pipe|pipes|traders|agency|agencies|store|stores|mart|shop|medical|medicals|pharmacy|bakery|bakes|cakes|sweets|automobiles|auto spares|fancy|stationery|supermarket|maligai)\b/i,
+    /(ஹார்டுவேர்|எலக்ட்ரிக்கல்ஸ்|பிளம்பிங்|டிரேடர்ஸ்|ஏஜென்சி|ஸ்டோர்|ஸ்டோர்ஸ்|மார்ட்|கடை|மெடிக்கல்|பார்மசி|பேக்கரி|ஸ்வீட்ஸ்|ஆட்டோ|ஸ்பேர்ஸ்|மளிகை)/i
+  ];
+
+  const filteredPlaces = rawPlaces.filter((p) => {
+    const name = p.displayName?.text || '';
+    
+    // Check if name hits any blacklist filter
+    const isBlacklisted = blacklistPatterns.some((pattern) => pattern.test(name));
+    if (isBlacklisted) return false;
+
+    // Reject 2-word plain personal names without business suffixes (e.g., "Ganesan Vellingiri")
+    const words = name.trim().split(/\s+/);
+    if (words.length === 2 && !retailPatterns.some((pat) => pat.test(name))) {
+      // If it contains only alphabetic personal name structure, drop it
+      const isPlainName = /^[A-Za-z\s]+$/.test(name) && !/(trader|agency|mart|shop|store|paints|pipe|pvc|steel|hard)/i.test(name);
+      if (isPlainName) return false;
+    }
+
+    return true;
+  });
+
+  // Calculate physical distance & sort closest first
+  const storesWithDistance = filteredPlaces.map((p) => {
     const pLat = p.location?.latitude || validLat;
     const pLng = p.location?.longitude || validLng;
     const dist = calculateDistanceKm(validLat, validLng, pLat, pLng);
