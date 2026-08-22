@@ -1,8 +1,20 @@
 require('dotenv').config();
+const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
 
-// Validate Environment Variables
+// 1. Lightweight Health-Check HTTP Server (Satisfies Render's Port Scan)
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('LMart Telegram Bot is active and healthy!\n');
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`🌐 Health-check server listening on port ${PORT}`);
+});
+
+// 2. Validate Bot Token
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.error('❌ Error: TELEGRAM_BOT_TOKEN is missing.');
   process.exit(1);
@@ -10,18 +22,18 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 
-// In-memory store for session coordinates
+// In-memory store for user location
 const userSessions = new Map();
 
-// Default fallback coordinates (Ichipatti / Tiruppur: 11.0168, 77.2514)
+// Default coordinates fallback (Ichipatti / Tiruppur: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
-// 1. /start command
+// 3. /start command
 bot.start((ctx) => {
   ctx.reply(
     `👋 *Welcome to LMart* — Your Hyperlocal AI Shopping Agent!\n\n` +
-    `Tell me what item you are looking for (e.g., *"Type-C fast charger"*, *"Drill machine"*, *"Paracetamol"*).\n\n` +
+    `Tell me what item you need (e.g., *"Type-C 65W charger"*, *"Drill machine"*, *"Paracetamol"*).\n\n` +
     `📍 Share your live location below to search nearest shops.`,
     {
       parse_mode: 'Markdown',
@@ -32,7 +44,7 @@ bot.start((ctx) => {
   );
 });
 
-// 2. Handle Location sharing
+// 4. Handle Location sharing
 bot.on('location', (ctx) => {
   const { latitude, longitude } = ctx.message.location;
   userSessions.set(ctx.chat.id, { latitude, longitude });
@@ -43,7 +55,7 @@ bot.on('location', (ctx) => {
   );
 });
 
-// 3. Handle Product Search Query
+// 5. Handle Product Search Query
 bot.on('text', async (ctx) => {
   const queryText = ctx.message.text.trim();
   const chatId = ctx.chat.id;
