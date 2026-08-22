@@ -234,7 +234,7 @@ bot.action('confirm_search', async (ctx) => {
   const isTamil = aiDecision.language === 'ta' || aiDecision.language === 'tanglish';
 
   await ctx.answerCbQuery();
-  await ctx.editMessageText(`🔍 Finding nearest <b>${escapeHtml(aiDecision.headingLabel)}</b> within 5 km...`, { parse_mode: 'HTML' });
+  await ctx.editMessageText(`🔍 Finding verified <b>${escapeHtml(aiDecision.headingLabel)}</b> near you...`, { parse_mode: 'HTML' });
 
   try {
     const stores = await searchHyperlocalStores(
@@ -257,7 +257,7 @@ bot.action('confirm_search', async (ctx) => {
     if (stores && stores.length > 0) {
       const headingText = isTamil
         ? `உங்களுக்கு மிக அருகிலுள்ள <b>${stores.length} ${escapeHtml(aiDecision.headingLabelTamil || 'கடைகள்')}</b>:\n\n`
-        : `Nearest <b>${stores.length} ${escapeHtml(aiDecision.headingLabel)}</b> (Ranked by Proximity):\n\n`;
+        : `Nearest <b>${stores.length} ${escapeHtml(aiDecision.headingLabel)}</b>:\n\n`;
 
       responseText += headingText;
 
@@ -289,10 +289,10 @@ bot.action('confirm_search', async (ctx) => {
     } else {
       responseText += isTamil
         ? `📍 அருகிலுள்ள குறிப்பிட்ட கடைகள் கிடைக்கவில்லை. கூகிள் மேப்பில் பார்க்க கீழே தொடவும்:`
-        : `📍 No matching ${escapeHtml(aiDecision.headingLabel)} found within 5 km. Tap below to explore Google Maps:`;
+        : `📍 No verified physical retail stores found within 5 km. Tap below to explore Google Maps:`;
     }
 
-    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(aiDecision.cleanQuery)}/@${session.latitude},${session.longitude},15z`;
+    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(aiDecision.cleanQuery + ' store')}/@${session.latitude},${session.longitude},15z`;
     const exploreText = isTamil 
       ? `📍 மேப்பில் அனைத்து "${escapeHtml(aiDecision.cleanQuery)}" பார்க்க` 
       : `📍 Explore all "${escapeHtml(aiDecision.cleanQuery)}" on Maps`;
@@ -332,10 +332,14 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
 1. Analyze Language & Entity:
    - Detect if the input is English, Tamil script, or Tanglish.
    - Extract canonical product and resolve brand names or colloquial terms (e.g., "Dolo" -> Paracetamol, "Fevikwik" -> Instant Adhesive, "1 inch CPVC" -> Plumbing Pipe).
-2. Retail Context Reasoning:
-   - Identify where this item is typically bought in tier-2/3 Indian towns and cities (Hardware & Plumbing Stores, Medicals & Pharmacies, Bakeries, Mobile & Electronics, Auto Spares, etc.).
+2. Retail Context Reasoning (Indian Market Dynamics):
+   - Identify the exact physical commercial store that stocks this:
+     * Hardware / Electrical: PVC/CPVC pipes, plumbing fittings, wires, paints, cement, tools.
+     * Pharmacies / Medicals: OTC meds, prescription tablets, health equipment.
+     * Bakeries: Cakes, puffs, pastries.
+     * Mobile & Electronics: Chargers, tempered glass, cables.
 3. Formulation:
-   - "cleanQuery" MUST be a natural 2-3 word store search phrase (e.g., "hardware electrical plumbing store", "pharmacy medical shop", "bakery cake shop", "mobile phone store").
+   - "cleanQuery" MUST contain explicit commercial store keywords that match Google Maps (e.g., "hardware electrical and plumbing store", "medical shop pharmacy", "bakery cake shop", "mobile phone shop").
 
 Return strictly valid JSON in this exact structure:
 {
@@ -397,7 +401,7 @@ Return strictly valid JSON in this exact structure:
   }
 }
 
-// 8. Hyperlocal Google Places API Search (Fast & Accurate)
+// 8. Hyperlocal Google Places API Search (Matching Google Maps Algorithm)
 async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
   if (!GOOGLE_MAPS_API_KEY) return [];
 
@@ -406,69 +410,70 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
   const headers = {
     'Content-Type': 'application/json',
     'X-Goog-Api-Key': GOOGLE_MAPS_API_KEY,
-    'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber'
+    'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.rating,places.userRatingCount,places.currentOpeningHours,places.location,places.nationalPhoneNumber,places.internationalPhoneNumber,places.types'
   };
 
   let places = [];
 
-  // Strategy A: searchNearby using AI's exact Place Types
-  if (placeTypes && placeTypes.length > 0) {
-    try {
-      const response = await axios.post(
-        'https://places.googleapis.com/v1/places:searchNearby',
-        {
-          includedTypes: placeTypes,
-          locationRestriction: {
-            circle: {
-              center: { latitude: validLat, longitude: validLng },
-              radius: 5000.0 // 5 km search boundary
-            }
-          },
-          rankPreference: "DISTANCE",
-          maxResultCount: 10
+  // Strategy A (Google Maps Matching): Text Search with Semantic Bias
+  try {
+    const searchQuery = `${cleanQuery} store shop`.trim();
+    const response = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      {
+        textQuery: searchQuery,
+        locationBias: {
+          circle: {
+            center: { latitude: validLat, longitude: validLng },
+            radius: 5000.0 // 5 km boundary
+          }
         },
-        { headers, timeout: 6000 }
-      );
-      places = response.data?.places || [];
-    } catch (e) {
-      console.warn("searchNearby notice:", e.message);
-    }
+        rankPreference: "RELEVANCE", // Relevance ensures genuine shops are picked over arbitrary entities
+        maxResultCount: 10
+      },
+      { headers, timeout: 6000 }
+    );
+    places = response.data?.places || [];
+  } catch (e) {
+    console.warn("searchText notice:", e.message);
   }
 
-  // Strategy B: Fallback to searchText with AI clean query
+  // Strategy B: Fallback to Nearby Search ONLY if text search found nothing
   if (!places || places.length === 0) {
-    try {
-      const response = await axios.post(
-        'https://places.googleapis.com/v1/places:searchText',
-        {
-          textQuery: String(cleanQuery || 'store').trim(),
-          locationBias: {
-            circle: {
-              center: { latitude: validLat, longitude: validLng },
-              radius: 5000.0
-            }
+    if (placeTypes && placeTypes.length > 0) {
+      try {
+        const response = await axios.post(
+          'https://places.googleapis.com/v1/places:searchNearby',
+          {
+            includedTypes: placeTypes,
+            locationRestriction: {
+              circle: {
+                center: { latitude: validLat, longitude: validLng },
+                radius: 5000.0
+              }
+            },
+            rankPreference: "DISTANCE",
+            maxResultCount: 8
           },
-          maxResultCount: 10
-        },
-        { headers, timeout: 6000 }
-      );
-      places = response.data?.places || [];
-    } catch (e) {
-      console.warn("searchText fallback notice:", e.message);
+          { headers, timeout: 6000 }
+        );
+        places = response.data?.places || [];
+      } catch (e) {
+        console.warn("searchNearby notice:", e.message);
+      }
     }
   }
 
-  // Soft exclusion for heavy industrial concrete workshops and fabricators
-  const excludeWords = /(cement works|hollow blocks|fabrication|workshop|precast|foundry|spinning mill|weaving mill|ஒர்க்ஸ்|மில்)/i;
-
-  const validStores = places.filter((p) => {
+  // Filter out studios, workshops, and individual services
+  const nonStoreRegex = /(studio|photography|photo|tailor|tailoring|creations|service center|repairing|works|hollow blocks|cement works|fabrication)/i;
+  const verifiedStores = places.filter((p) => {
     const name = p.displayName?.text || '';
-    return !excludeWords.test(name);
+    return !nonStoreRegex.test(name);
   });
 
-  const finalPool = validStores.length > 0 ? validStores : places;
+  const finalPool = verifiedStores.length > 0 ? verifiedStores : places;
 
-  // Calculate physical distance & sort closest first
+  // Calculate physical distance & sort
   const storesWithDistance = finalPool.map((p) => {
     const pLat = p.location?.latitude || validLat;
     const pLng = p.location?.longitude || validLng;
