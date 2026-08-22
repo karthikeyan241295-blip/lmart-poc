@@ -6,7 +6,7 @@ const axios = require('axios');
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart 2-Step Agentic Bot is active!\n');
+  res.end('LMart Auto-Model Discovery AI Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -33,9 +33,12 @@ const userSessions = new Map();
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
 
+// Cache active Gemini model name
+let activeGeminiModel = null;
+
 // Helper: Calculate Exact Distance in Kilometers (Haversine formula)
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371; // Earth radius in km
+  const R = 6371;
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -51,12 +54,12 @@ bot.start((ctx) => {
   const welcomeText = 
     `👋 *Welcome to LMart* — Your Autonomous AI Shopping Agent!\n` +
     `*எல்மார்ட்* — அனைத்து பொருட்களையும் அருகிலுள்ள கடைகளில் கண்டறியும் AI உதவியாளர்!\n\n` +
-    `Type any item you want to find:\n` +
+    `Type any item in *English, தமிழ், or Tanglish*:\n` +
     `• *"1 inch PVC pipe"*\n` +
     `• *"Dolo 650"* or *"பாராசிட்டமால்"*\n` +
     `• *"Brownie cake"*\n` +
     `• *"Type-C fast charger"*\n\n` +
-    `📍 Please share your live location below so I can locate stores around you.`;
+    `📍 Please share your live location below to find the nearest stores & phone numbers.`;
 
   ctx.reply(welcomeText, {
     parse_mode: 'Markdown',
@@ -82,7 +85,7 @@ bot.on('location', (ctx) => {
   );
 });
 
-// 5. STEP 1: AI Analyzes Product and Requests User Acknowledgment
+// 5. STEP 1: AI Analyzes Product & Asks Acknowledgment
 bot.on('text', async (ctx) => {
   const queryText = ctx.message.text.trim();
   const chatId = ctx.chat.id;
@@ -93,10 +96,10 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🧠 AI Agent is analyzing "${queryText}"...`);
 
   try {
-    // Run AI Semantic Reasoning
+    // Run AI Semantic Reasoning with Dynamic Model Discovery
     const aiDecision = await runAIAgent(queryText);
 
-    // Save pending decision in user session
+    // Save decision in session
     session.pendingSearch = aiDecision;
     userSessions.set(chatId, session);
 
@@ -137,12 +140,12 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ AI Error: ${err.message || 'Unable to classify product.'}\nPlease check your GEMINI_API_KEY.`
+      `⚠️ AI Error: ${err.message}\nMake sure Generative Language API is enabled for your GEMINI_API_KEY.`
     );
   }
 });
 
-// 6. STEP 2: User Acknowledges -> Bot Queries Google Places & Displays Results
+// 6. STEP 2: User Acknowledges -> Queries Google Places
 bot.action('confirm_search', async (ctx) => {
   const chatId = ctx.chat.id;
   const session = userSessions.get(chatId);
@@ -253,7 +256,33 @@ function safeJsonParse(text) {
   }
 }
 
-// 🧠 Autonomous AI Agent (Strict Reasoning — No Generic Supermarket Fallbacks)
+// 🔍 Helper: Automatically Discover the Working Gemini Model for Your Account
+async function discoverWorkingGeminiModel() {
+  if (activeGeminiModel) return activeGeminiModel;
+
+  try {
+    const listRes = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+      { timeout: 5000 }
+    );
+    const models = listRes.data?.models || [];
+    const supported = models.find(m => 
+      m.supportedGenerationMethods?.includes('generateContent') && 
+      (m.name.includes('flash') || m.name.includes('gemini'))
+    );
+    if (supported) {
+      activeGeminiModel = supported.name.replace('models/', '');
+      console.log(`✅ Automatically Selected Active Gemini Model: ${activeGeminiModel}`);
+      return activeGeminiModel;
+    }
+  } catch (e) {
+    console.warn('Model list auto-discovery failed, using fallback list:', e.message);
+  }
+
+  return 'gemini-1.5-flash-latest';
+}
+
+// 🧠 Autonomous AI Agent with Dynamic Model Discovery
 async function runAIAgent(userInput) {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not configured in Render Environment Variables.');
@@ -290,16 +319,15 @@ async function runAIAgent(userInput) {
   }
   `;
 
-  const endpoints = [
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-    `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
-  ];
+  // Auto-discover model or try supported list
+  const discovered = await discoverWorkingGeminiModel();
+  const modelsToTry = [discovered, 'gemini-1.5-flash-latest', 'gemini-1.5-flash-002', 'gemini-2.0-flash', 'gemini-1.5-pro'];
 
   let lastError = null;
 
-  for (const endpoint of endpoints) {
+  for (const model of modelsToTry) {
     try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
       const response = await axios.post(
         endpoint,
         {
@@ -314,11 +342,12 @@ async function runAIAgent(userInput) {
       const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
       const parsed = safeJsonParse(rawText);
       if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
+        activeGeminiModel = model; // Cache working model
         return parsed;
       }
     } catch (err) {
       lastError = err;
-      console.warn(`Gemini endpoint failed: ${err.message}`);
+      console.warn(`Model ${model} attempt failed: ${err.message}`);
     }
   }
 
@@ -417,7 +446,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
 // Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart 2-Step Agentic Bot is running...');
+  console.log('🚀 LMart Auto-Model Discovery Bot is running...');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
