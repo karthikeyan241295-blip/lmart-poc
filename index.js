@@ -6,7 +6,7 @@ const axios = require('axios');
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Pure AI Shopping Agent is active!\n');
+  res.end('LMart 2-Step Agentic Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -35,7 +35,7 @@ const DEFAULT_LNG = 77.2514;
 
 // Helper: Calculate Exact Distance in Kilometers (Haversine formula)
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
+  const R = 6371; // Earth radius in km
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -51,13 +51,12 @@ bot.start((ctx) => {
   const welcomeText = 
     `👋 *Welcome to LMart* — Your Autonomous AI Shopping Agent!\n` +
     `*எல்மார்ட்* — அனைத்து பொருட்களையும் அருகிலுள்ள கடைகளில் கண்டறியும் AI உதவியாளர்!\n\n` +
-    `Ask for *ANY* product in *English, தமிழ், or Tanglish*:\n` +
+    `Type any item you want to find:\n` +
+    `• *"1 inch PVC pipe"*\n` +
     `• *"Dolo 650"* or *"பாராசிட்டமால்"*\n` +
     `• *"Brownie cake"*\n` +
-    `• *"Type-C fast charger"*\n` +
-    `• *"1 inch PVC pipe"*\n` +
-    `• *"Pedigree dog food"*\n\n` +
-    `📍 Please share your live location below to find the nearest stores & phone numbers.`;
+    `• *"Type-C fast charger"*\n\n` +
+    `📍 Please share your live location below so I can locate stores around you.`;
 
   ctx.reply(welcomeText, {
     parse_mode: 'Markdown',
@@ -70,7 +69,9 @@ bot.start((ctx) => {
 // 4. Handle Location sharing
 bot.on('location', (ctx) => {
   const { latitude, longitude } = ctx.message.location;
+  const current = userSessions.get(ctx.chat.id) || {};
   userSessions.set(ctx.chat.id, { 
+    ...current,
     latitude: Number(latitude) || DEFAULT_LAT, 
     longitude: Number(longitude) || DEFAULT_LNG 
   });
@@ -81,7 +82,7 @@ bot.on('location', (ctx) => {
   );
 });
 
-// 5. Handle Product Search Query (100% Agentic AI Driven)
+// 5. STEP 1: AI Analyzes Product and Requests User Acknowledgment
 bot.on('text', async (ctx) => {
   const queryText = ctx.message.text.trim();
   const chatId = ctx.chat.id;
@@ -89,38 +90,91 @@ bot.on('text', async (ctx) => {
   if (queryText.startsWith('/')) return;
 
   const session = userSessions.get(chatId) || { latitude: DEFAULT_LAT, longitude: DEFAULT_LNG };
-  const statusMsg = await ctx.reply(`🧠 AI Agent is analyzing product & discovering nearest stores...`);
+  const statusMsg = await ctx.reply(`🧠 AI Agent is analyzing "${queryText}"...`);
 
   try {
-    // Step A: Full Autonomous AI Semantic Reasoning (No if/else conditions)
-    const agentDecision = await runAIAgent(queryText);
+    // Run AI Semantic Reasoning
+    const aiDecision = await runAIAgent(queryText);
 
-    // Step B: Query Google Places using AI-decided parameters
-    let stores = [];
-    try {
-      stores = await searchHyperlocalStores(
-        agentDecision.placeTypes,
-        agentDecision.cleanQuery,
-        session.latitude,
-        session.longitude
-      );
-    } catch (err) {
-      console.warn('Google Places API notice:', err.message);
-    }
+    // Save pending decision in user session
+    session.pendingSearch = aiDecision;
+    userSessions.set(chatId, session);
 
-    // Step C: Dynamic Response Formatting based on AI decisions
-    const isTamil = agentDecision.language === 'ta' || agentDecision.language === 'tanglish';
-    
-    let responseText = isTamil ? `🛒 *எல்மார்ட் AI தேடல் (LMart)*\n` : `🛒 *LMart AI Stock Finder*\n`;
-    responseText += isTamil ? `*பொருள்:* ${agentDecision.localizedName || agentDecision.productName}\n` : `*Item:* ${agentDecision.productName}\n`;
-    responseText += isTamil ? `*வகை:* ${agentDecision.category}\n\n` : `*Category:* ${agentDecision.category}\n\n`;
+    const isTamil = aiDecision.language === 'ta' || aiDecision.language === 'tanglish';
+
+    const confirmText = isTamil
+      ? `🎯 *AI பொருள் வகை அடையாளம்:*\n\n` +
+        `📦 *பொருள்:* ${aiDecision.localizedName || aiDecision.productName}\n` +
+        `🏷️ *வகை:* ${aiDecision.category}\n` +
+        `🏬 *தேடப்படும் கடை வகை:* ${aiDecision.headingLabelTamil || aiDecision.headingLabel}\n\n` +
+        `இந்த கடைகளை உங்கள் இருப்பிடத்திற்கு அருகில் தேடவா?`
+      : `🎯 *AI Category Identification:*\n\n` +
+        `📦 *Product:* ${aiDecision.productName}\n` +
+        `🏷️ *Category:* ${aiDecision.category}\n` +
+        `🏬 *Target Stores:* ${aiDecision.headingLabel}\n\n` +
+        `Shall I search for verified *${aiDecision.headingLabel}* near your location?`;
+
+    const confirmBtnText = isTamil ? '✅ ஆம், அருகிலுள்ள கடைகளை தேடு' : '✅ Yes, Find Nearest Stores';
+    const cancelBtnText = isTamil ? '❌ ரத்து செய்' : '❌ Cancel';
+
+    await ctx.telegram.editMessageText(
+      chatId,
+      statusMsg.message_id,
+      null,
+      confirmText,
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(confirmBtnText, 'confirm_search')],
+          [Markup.button.callback(cancelBtnText, 'cancel_search')]
+        ])
+      }
+    );
+
+  } catch (err) {
+    console.error('AI Processing Error:', err);
+    ctx.telegram.editMessageText(
+      chatId,
+      statusMsg.message_id,
+      null,
+      `⚠️ AI Error: ${err.message || 'Unable to classify product.'}\nPlease check your GEMINI_API_KEY.`
+    );
+  }
+});
+
+// 6. STEP 2: User Acknowledges -> Bot Queries Google Places & Displays Results
+bot.action('confirm_search', async (ctx) => {
+  const chatId = ctx.chat.id;
+  const session = userSessions.get(chatId);
+
+  if (!session || !session.pendingSearch) {
+    return ctx.reply('⚠️ Session expired. Please send your product query again.');
+  }
+
+  const aiDecision = session.pendingSearch;
+  const isTamil = aiDecision.language === 'ta' || aiDecision.language === 'tanglish';
+
+  await ctx.answerCbQuery();
+  await ctx.editMessageText(`🔍 Finding nearest *${aiDecision.headingLabel}* within 5 km...`, { parse_mode: 'Markdown' });
+
+  try {
+    const stores = await searchHyperlocalStores(
+      aiDecision.placeTypes,
+      aiDecision.cleanQuery,
+      session.latitude,
+      session.longitude
+    );
+
+    let responseText = isTamil ? `🛒 *எல்மார்ட் AI முடிவு (LMart)*\n` : `🛒 *LMart Stock Finder*\n`;
+    responseText += isTamil ? `*பொருள்:* ${aiDecision.localizedName || aiDecision.productName}\n` : `*Item:* ${aiDecision.productName}\n`;
+    responseText += isTamil ? `*வகை:* ${aiDecision.category}\n\n` : `*Category:* ${aiDecision.category}\n\n`;
 
     const inlineButtons = [];
 
     if (stores && stores.length > 0) {
       const headingText = isTamil
-        ? `உங்களுக்கு மிக அருகிலுள்ள *${stores.length} ${agentDecision.headingLabelTamil || 'கடைகள்'}* (தூரத்தின்படி):\n\n`
-        : `Nearest *${stores.length} ${agentDecision.headingLabel || 'Stores'}* (Ranked by Distance):\n\n`;
+        ? `உங்களுக்கு மிக அருகிலுள்ள *${stores.length} ${aiDecision.headingLabelTamil || 'கடைகள்'}*:\n\n`
+        : `Nearest *${stores.length} ${aiDecision.headingLabel}* (Ranked by Proximity):\n\n`;
 
       responseText += headingText;
 
@@ -150,37 +204,34 @@ bot.on('text', async (ctx) => {
         inlineButtons.push([Markup.button.url(dirBtnText, navUrl)]);
       });
     } else {
-      responseText += `📍 No specific matching shops found within 5 km. Tap below to explore Google Maps:`;
+      responseText += isTamil
+        ? `📍 அருகிலுள்ள குறிப்பிட்ட கடைகள் கிடைக்கவில்லை. கூகிள் மேப்பில் பார்க்க கீழே தொடவும்:`
+        : `📍 No matching ${aiDecision.headingLabel} found within 5 km. Tap below to explore Google Maps:`;
     }
 
-    // Direct Google Maps Explore button using AI's clean query
-    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(agentDecision.cleanQuery)}/@${session.latitude},${session.longitude},15z`;
+    // Direct Google Maps Explore button
+    const directSearchUrl = `https://www.google.com/maps/search/${encodeURIComponent(aiDecision.cleanQuery)}/@${session.latitude},${session.longitude},15z`;
     const exploreText = isTamil 
-      ? `📍 மேப்பில் அருகிலுள்ள "${agentDecision.cleanQuery}" பார்க்க` 
-      : `📍 Explore "${agentDecision.cleanQuery}" on Maps`;
+      ? `📍 மேப்பில் அனைத்து "${aiDecision.cleanQuery}" பார்க்க` 
+      : `📍 Explore all "${aiDecision.cleanQuery}" on Maps`;
 
     inlineButtons.push([Markup.button.url(exploreText, directSearchUrl)]);
 
-    await ctx.telegram.editMessageText(
-      chatId,
-      statusMsg.message_id,
-      null,
-      responseText,
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard(inlineButtons)
-      }
-    );
+    await ctx.editMessageText(responseText, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(inlineButtons)
+    });
 
   } catch (error) {
-    console.error('General Error:', error);
-    ctx.telegram.editMessageText(
-      chatId,
-      statusMsg.message_id,
-      null,
-      `⚠️ An error occurred while processing. Please try again.`
-    );
+    console.error('Store Search Error:', error);
+    ctx.reply('⚠️ Error locating stores. Please try again.');
   }
+});
+
+// Handle Cancel Action
+bot.action('cancel_search', async (ctx) => {
+  await ctx.answerCbQuery();
+  await ctx.editMessageText('❌ Search cancelled. Send another product name anytime!');
 });
 
 // Helper: Safe JSON Parser
@@ -202,35 +253,31 @@ function safeJsonParse(text) {
   }
 }
 
-// 🧠 Autonomous AI Agent Reasoning Function (Zero Hardcoded If/Else)
+// 🧠 Autonomous AI Agent (Strict Reasoning — No Generic Supermarket Fallbacks)
 async function runAIAgent(userInput) {
+  if (!GEMINI_API_KEY) {
+    throw new Error('GEMINI_API_KEY is not configured in Render Environment Variables.');
+  }
+
   const prompt = `
-  You are an autonomous AI shopping agent for physical local retail in Tamil Nadu, India.
+  You are an expert AI retail shopping agent for Tamil Nadu, India.
   User Search: "${userInput}".
   
-  Your task is to understand what this product is and determine the exact physical store in India where it can be purchased.
+  Determine the exact physical retail shop in India where this item is sold.
   
-  Instructions:
-  1. Detect language: "en" (English), "ta" (Tamil script), or "tanglish" (Tamil in Latin script).
-  2. Extract canonical "productName" and "localizedName" (Tamil translation if applicable).
-  3. Formulate an exact "category" with an appropriate emoji:
-     - Medicines/health items (e.g., Dolo, Paracetamol, Syrups) -> "💊 Pharmacy & Healthcare"
-     - Bakery/cakes/sweets (e.g., Brownie, Cakes, Puffs, Snacks) -> "🎂 Bakery & Cake Shop"
-     - Pet items (e.g., Pedigree, Cat food, Fish food) -> "🐾 Pet Care & Supplies"
-     - Hardware/plumbing/tools (e.g., PVC pipe, drills, wires) -> "🔧 Hardware & Electricals"
-     - Electronics/accessories (e.g., chargers, cables, earbuds) -> "🔌 Electronics & Gadgets"
-     - Cosmetics/skincare (e.g., sunscreen, lipstick, shampoo) -> "💄 Cosmetics & Beauty"
-     - Grocery/provisions (e.g., rice, oil, milk, biscuits) -> "🛒 Supermarket & Grocery"
-     - Clothing/textiles (e.g., sarees, shirts, dresses) -> "👗 Clothing & Textiles"
-     - Auto spares (e.g., bike engine oil, tyres, puncture) -> "🚗 Automobile & Two-Wheeler"
-     - Books/stationery (e.g., notebooks, pens, xerox) -> "📚 Books & Stationery"
-  4. Formulate "headingLabel" (Plural store type, e.g. "Medicals & Pharmacies", "Bakeries & Cake Shops", "Pet Stores", "Hardware Stores") and "headingLabelTamil".
-  5. Select 1 or 2 official Google Place Types for "placeTypes" matching Google's taxonomy:
-     ["pharmacy", "drugstore", "bakery", "cafe", "pet_store", "cell_phone_store", "electronics_store", "hardware_store", "electrical_supply_store", "home_improvement_store", "supermarket", "grocery_store", "convenience_store", "clothing_store", "shoe_store", "book_store", "auto_parts_store", "car_repair", "motorcycle_repair", "florist", "beauty_salon", "cosmetics_store"].
-     (NEVER use generic "store" or "point_of_interest").
-  6. Formulate "cleanQuery": A short 2-3 word natural search phrase for Google Maps (e.g., "medical shop pharmacy", "bakery cake shop", "pet shop", "hardware store", "mobile accessories").
+  Rules:
+  1. Detect language: "en", "ta" (Tamil script), or "tanglish" (Tamil words in English script).
+  2. "productName": Clean canonical item name.
+  3. "localizedName": Tamil translation of the product name.
+  4. "category": Descriptive category with emoji (e.g., "🔧 Hardware, Electricals & Plumbing", "💊 Pharmacy & Healthcare", "🎂 Bakery & Cake Shop", "🔌 Mobile & Electronics", "🐾 Pet Care & Food", "👗 Clothing & Textiles", "🚗 Auto Spares & Garage", "📚 Stationery & Books").
+  5. "headingLabel": Plural target store name in English (e.g., "Hardware & Plumbing Stores", "Medicals & Pharmacies", "Bakeries & Cake Shops", "Mobile Accessories Stores", "Pet Shops").
+  6. "headingLabelTamil": Plural target store name in Tamil (e.g., "ஹார்டுவேர் கடைகள்", "மருந்தகங்கள்", "பேக்கரி & கேக் கடைகள்", "மொபைல் கடைகள்").
+  7. "placeTypes": 1 or 2 matching official Google Place Types:
+     ["hardware_store", "electrical_supply_store", "home_improvement_store", "pharmacy", "drugstore", "bakery", "cafe", "cell_phone_store", "electronics_store", "pet_store", "clothing_store", "auto_parts_store", "car_repair", "motorcycle_repair", "book_store", "supermarket", "grocery_store", "beauty_salon", "cosmetics_store", "florist"].
+     (NEVER use generic "store" or "supermarket" for hardware, medicines, cakes, or electronics).
+  8. "cleanQuery": A short 2-3 word natural search query for Google Maps (e.g., "hardware electrical plumbing", "medical shop pharmacy", "bakery cake shop", "mobile accessories").
   
-  Return strictly valid JSON:
+  Return strictly valid JSON in this exact structure:
   {
     "language": "en" | "ta" | "tanglish",
     "productName": "string",
@@ -243,51 +290,44 @@ async function runAIAgent(userInput) {
   }
   `;
 
-  if (GEMINI_API_KEY && !GEMINI_API_KEY.startsWith('http')) {
-    const endpoints = [
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
-    ];
+  const endpoints = [
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`,
+    `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`
+  ];
 
-    for (const endpoint of endpoints) {
-      try {
-        const response = await axios.post(
-          endpoint,
-          {
-            contents: [{ parts: [{ text: prompt }] }],
-            generationConfig: { responseMimeType: 'application/json' }
-          },
-          { timeout: 7000 }
-        );
+  let lastError = null;
 
-        const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        const parsed = safeJsonParse(rawText);
-        if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
-          return parsed;
+  for (const endpoint of endpoints) {
+    try {
+      const response = await axios.post(
+        endpoint,
+        {
+          contents: [{ parts: [{ text: prompt }] }]
+        },
+        {
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 8000
         }
-      } catch (err) {
-        console.warn('AI Agent endpoint attempt failed:', err.message);
+      );
+
+      const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      const parsed = safeJsonParse(rawText);
+      if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
+        return parsed;
       }
+    } catch (err) {
+      lastError = err;
+      console.warn(`Gemini endpoint failed: ${err.message}`);
     }
   }
 
-  // Pure fallback if API key is unconfigured
-  return {
-    language: "en",
-    productName: userInput,
-    localizedName: userInput,
-    category: "🛒 General Retail",
-    headingLabel: "Local Stores",
-    headingLabelTamil: "அருகிலுள்ள கடைகள்",
-    placeTypes: ["supermarket"],
-    cleanQuery: `${userInput} shop`
-  };
+  throw new Error(`AI Classification failed: ${lastError?.response?.data?.error?.message || lastError?.message || 'Check Gemini API Key'}`);
 }
 
-// Helper 2: Hyperlocal Google Places Search using AI-determined parameters
+// Helper: Hyperlocal Google Places Search
 async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
-  if (!GOOGLE_MAPS_API_KEY || GOOGLE_MAPS_API_KEY.startsWith('http')) {
+  if (!GOOGLE_MAPS_API_KEY) {
     return [];
   }
 
@@ -301,7 +341,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
   let places = [];
 
-  // Strategy A: Google searchNearby using AI's exact Place Types (Strict Distance Ranking)
+  // Strategy A: searchNearby using AI's exact Place Types (Distance Ranked)
   if (placeTypes && placeTypes.length > 0) {
     try {
       const nearbyUrl = `https://places.googleapis.com/v1/places:searchNearby`;
@@ -326,7 +366,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
     }
   }
 
-  // Strategy B: Fallback to searchText with AI's clean search query
+  // Strategy B: Fallback to searchText with AI's clean query
   if (!places || places.length === 0) {
     try {
       const textUrl = `https://places.googleapis.com/v1/places:searchText`;
@@ -350,7 +390,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
     }
   }
 
-  // Map and calculate exact physical distance
+  // Calculate physical distance & sort
   const storesWithDistance = places.map((p) => {
     const pLat = p.location?.latitude || validLat;
     const pLng = p.location?.longitude || validLng;
@@ -370,7 +410,6 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
     };
   });
 
-  // Strict sorting: Closest stores appear first
   storesWithDistance.sort((a, b) => a.distanceKm - b.distanceKm);
 
   return storesWithDistance;
@@ -378,7 +417,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
 // Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart Pure AI Agent Bot is active...');
+  console.log('🚀 LMart 2-Step Agentic Bot is running...');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
