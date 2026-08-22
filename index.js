@@ -6,7 +6,7 @@ const axios = require('axios');
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Official Agentic AI Bot is active!\n');
+  res.end('LMart Official Autonomous AI Agent Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -28,6 +28,7 @@ if (!TELEGRAM_BOT_TOKEN) {
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 const userSessions = new Map();
+let discoveredActiveModel = null;
 
 // Global Error Handler for Telegraf
 bot.catch((err, ctx) => {
@@ -50,7 +51,7 @@ function escapeHtml(str) {
 
 // Helper: Haversine distance formula
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
-  const R = 6371;
+  const R = 6371; // Earth radius in km
   const dLat = (lat2 - lat1) * (Math.PI / 180);
   const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
@@ -77,6 +78,48 @@ function safeParseJson(raw) {
     }
     return null;
   }
+}
+
+// Autonomous Model Discovery: Queries your API key for live supported models
+async function getAvailableModel() {
+  if (discoveredActiveModel) return discoveredActiveModel;
+
+  try {
+    const res = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}`,
+      { timeout: 8000 }
+    );
+    const models = res.data?.models || [];
+    
+    // Filter models supporting generateContent
+    const supported = models
+      .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+      .map((m) => m.name.replace(/^models\//, ''));
+
+    console.log('📋 Available models for your API key:', supported);
+
+    // Pick preferred flash model first
+    const preferredOrder = ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro'];
+    for (const pref of preferredOrder) {
+      const match = supported.find((m) => m === pref || m.startsWith(pref));
+      if (match) {
+        discoveredActiveModel = match;
+        console.log(`🎯 Auto-selected optimal model: ${discoveredActiveModel}`);
+        return discoveredActiveModel;
+      }
+    }
+
+    if (supported.length > 0) {
+      discoveredActiveModel = supported[0];
+      console.log(`🎯 Auto-selected fallback model: ${discoveredActiveModel}`);
+      return discoveredActiveModel;
+    }
+  } catch (err) {
+    console.warn('⚠️ Model list discovery failed:', err.response?.data?.error?.message || err.message);
+  }
+
+  // Last-resort fallback
+  return 'gemini-2.0-flash';
 }
 
 // 3. /start command
@@ -268,11 +311,13 @@ bot.action('cancel_search', async (ctx) => {
   await ctx.editMessageText('❌ Search cancelled. Send another product name anytime!');
 });
 
-// 7. Autonomous Agentic Reasoner Powered by Direct REST with CoT
+// 7. Autonomous Agentic Reasoner
 async function runAIAgent(userInput) {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not configured in environment.');
   }
+
+  const activeModel = await getAvailableModel();
 
   const systemInstruction = `
 You are an autonomous hyper-local retail reasoning agent specialized in the retail trade landscape of Tamil Nadu & South India.
@@ -313,59 +358,46 @@ Return strictly valid JSON in this exact structure:
 }
 `;
 
-  // Fallback list of active Flash models
-  const candidateModels = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-latest'
-  ];
-
-  let lastError = null;
-
-  for (const modelName of candidateModels) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${GEMINI_API_KEY}`;
-      
-      const payload = {
-        systemInstruction: {
-          parts: [{ text: systemInstruction }]
-        },
-        contents: [
-          {
-            parts: [{ text: `Perform multi-step agent reasoning for this item search: "${userInput}"` }]
-          }
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.1
-        }
-      };
-
-      const res = await axios.post(url, payload, {
-        headers: { 'Content-Type': 'application/json' },
-        timeout: 10000
-      });
-
-      const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-      const decision = safeParseJson(rawText);
-
-      if (decision && decision.category && decision.placeTypes && decision.placeTypes.length > 0) {
-        console.log(`✅ Gemini active on: ${modelName}`);
-        console.log('🤖 [Agentic CoT Analysis]:');
-        console.log(` ↳ Intent: ${decision.reasoning?.intentAnalysis}`);
-        console.log(` ↳ Market Logic: ${decision.reasoning?.marketStockLocation}`);
-        console.log(` ↳ Search Strategy: ${decision.reasoning?.targetStrategy}`);
-        return decision;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${activeModel}:generateContent?key=${GEMINI_API_KEY}`;
+  
+  const payload = {
+    systemInstruction: {
+      parts: [{ text: systemInstruction }]
+    },
+    contents: [
+      {
+        parts: [{ text: `Perform multi-step agent reasoning for this item search: "${userInput}"` }]
       }
-    } catch (err) {
-      const apiErrMsg = err.response?.data?.error?.message || err.message;
-      console.warn(`⚠️ Model attempt on ${modelName} failed: ${apiErrMsg}`);
-      lastError = apiErrMsg;
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.1
     }
-  }
+  };
 
-  throw new Error(`AI Agent reasoning failed: ${lastError}. Make sure "Generative Language API" is enabled in your Google Cloud / AI Studio project.`);
+  try {
+    const res = await axios.post(url, payload, {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 10000
+    });
+
+    const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const decision = safeParseJson(rawText);
+
+    if (decision && decision.category && decision.placeTypes && decision.placeTypes.length > 0) {
+      console.log(`✅ Reasoning success via ${activeModel}`);
+      console.log('🤖 [Agentic CoT Analysis]:');
+      console.log(` ↳ Intent: ${decision.reasoning?.intentAnalysis}`);
+      console.log(` ↳ Market Logic: ${decision.reasoning?.marketStockLocation}`);
+      console.log(` ↳ Search Strategy: ${decision.reasoning?.targetStrategy}`);
+      return decision;
+    }
+    throw new Error('Invalid JSON structure returned by model');
+  } catch (err) {
+    discoveredActiveModel = null; // Invalidate cached model to re-scan on next failure
+    const apiErrMsg = err.response?.data?.error?.message || err.message;
+    throw new Error(apiErrMsg);
+  }
 }
 
 // 8. Hyperlocal Google Places API Search
