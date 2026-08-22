@@ -2,11 +2,12 @@ require('dotenv').config();
 const http = require('http');
 const { Telegraf, Markup } = require('telegraf');
 const axios = require('axios');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 // 1. Health-Check Server (Satisfies Render Port Scan)
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('LMart Dynamic AI Model Discovery Bot is active!\n');
+  res.end('LMart Official Gemini SDK Bot is active!\n');
 });
 
 const PORT = process.env.PORT || 3000;
@@ -32,9 +33,6 @@ const userSessions = new Map();
 // Default coordinates fallback (Ichipatti / Samalapuram area: 11.0168, 77.2514)
 const DEFAULT_LAT = 11.0168;
 const DEFAULT_LNG = 77.2514;
-
-// Cache active Gemini model
-let cachedGeminiModelName = null;
 
 // Helper: Calculate Exact Distance in Kilometers (Haversine formula)
 function calculateDistanceKm(lat1, lon1, lat2, lon2) {
@@ -96,7 +94,7 @@ bot.on('text', async (ctx) => {
   const statusMsg = await ctx.reply(`🧠 AI Agent is analyzing "${queryText}"...`);
 
   try {
-    // Run AI Semantic Reasoning with Dynamic Model Discovery
+    // Run AI Semantic Reasoning with Official Google Generative AI SDK
     const aiDecision = await runAIAgent(queryText);
 
     // Save decision in session
@@ -140,7 +138,7 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ AI Error: ${err.message}\nMake sure your GEMINI_API_KEY from aistudio.google.com is active.`
+      `⚠️ AI Error: ${err.message}\nMake sure your GEMINI_API_KEY is active.`
     );
   }
 });
@@ -256,34 +254,7 @@ function safeJsonParse(text) {
   }
 }
 
-// 🔍 Helper: Automatically discover working models for your API key from v1beta
-async function discoverWorkingGeminiModel() {
-  if (cachedGeminiModelName) return cachedGeminiModelName;
-
-  try {
-    const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(GEMINI_API_KEY)}`;
-    const listRes = await axios.get(listUrl, { timeout: 6000 });
-    const models = listRes.data?.models || [];
-    
-    // Find the first model that supports generateContent
-    const match = models.find(m => 
-      m.supportedGenerationMethods?.includes('generateContent') &&
-      (m.name.includes('flash') || m.name.includes('gemini-2') || m.name.includes('gemini-1.5') || m.name.includes('gemini-pro'))
-    );
-
-    if (match) {
-      cachedGeminiModelName = match.name; // e.g. "models/gemini-1.5-flash-latest"
-      console.log(`✅ Auto-discovered active Gemini model: ${cachedGeminiModelName}`);
-      return cachedGeminiModelName;
-    }
-  } catch (e) {
-    console.warn('Model list discovery error:', e.message);
-  }
-
-  return 'models/gemini-1.5-flash-latest';
-}
-
-// 🧠 Autonomous AI Agent (Strict Reasoning via v1beta)
+// 🧠 Autonomous AI Agent Powered by Official Google Generative AI SDK
 async function runAIAgent(userInput) {
   if (!GEMINI_API_KEY) {
     throw new Error('GEMINI_API_KEY is not configured in Render Environment Variables.');
@@ -320,28 +291,28 @@ async function runAIAgent(userInput) {
   }
   `;
 
-  // Auto-discover model name
-  const modelName = await discoverWorkingGeminiModel();
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/${modelName}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  
+  // Try flash models via official SDK
+  const modelsToTry = ['gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-2.0-flash', 'gemini-pro'];
+  let lastError = null;
 
-  const response = await axios.post(
-    endpoint,
-    {
-      contents: [{ parts: [{ text: prompt }] }]
-    },
-    {
-      headers: { 'Content-Type': 'application/json' },
-      timeout: 9000
+  for (const modelName of modelsToTry) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const rawText = result.response.text();
+      const parsed = safeJsonParse(rawText);
+      if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
+        return parsed;
+      }
+    } catch (err) {
+      lastError = err;
+      console.warn(`SDK model ${modelName} attempt notice:`, err.message);
     }
-  );
-
-  const rawText = response.data?.candidates?.[0]?.content?.parts?.[0]?.text;
-  const parsed = safeJsonParse(rawText);
-  if (parsed && parsed.category && parsed.placeTypes && parsed.placeTypes.length > 0) {
-    return parsed;
   }
 
-  throw new Error('AI returned an invalid response structure. Please try again.');
+  throw new Error(`AI Agent reasoning failed: ${lastError?.message || 'Check Gemini API Key'}`);
 }
 
 // Helper: Hyperlocal Google Places Search
@@ -436,7 +407,7 @@ async function searchHyperlocalStores(placeTypes, cleanQuery, lat, lng) {
 
 // Launch Bot
 bot.launch().then(() => {
-  console.log('🚀 LMart Auto-Model Discovery Bot is running...');
+  console.log('🚀 LMart Official Gemini SDK Bot is active...');
 });
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
