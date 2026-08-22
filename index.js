@@ -28,7 +28,10 @@ if (!TELEGRAM_BOT_TOKEN) {
 }
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+
+// Initialize Gemini with standard v1 API Version to avoid v1beta 404s
 const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+
 const userSessions = new Map();
 
 // Global Error Handler for Telegraf
@@ -60,6 +63,25 @@ function calculateDistanceKm(lat1, lon1, lat2, lon2) {
     Math.cos(lat1 * (Math.PI / 180)) * Math.cos(lat2 * (Math.PI / 180)) *
     Math.sin(dLon / 2) * Math.sin(dLon / 2);
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Helper: Safe JSON string parser fallback
+function safeParseJson(raw) {
+  if (!raw) return null;
+  const clean = raw.replace(/```json/gi, '').replace(/```/g, '').trim();
+  try {
+    return JSON.parse(clean);
+  } catch {
+    const match = clean.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
 }
 
 // 3. /start command
@@ -151,7 +173,7 @@ bot.on('text', async (ctx) => {
       chatId,
       statusMsg.message_id,
       null,
-      `⚠️ AI Error: ${escapeHtml(err.message)}\nPlease try again in a moment.`
+      `⚠️ AI Error: ${escapeHtml(err.message)}\nPlease check your API key & try again.`
     );
   }
 });
@@ -264,7 +286,7 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
 ### Agentic Cognitive Process:
 1. Analyze Language & Entity:
    - Detect if the input is English, Tamil script, or Tanglish (e.g., "oru dolo kudu", "kannadi frame", "mookuthi", "palam", "pipe").
-   - Extract the canonical product and resolve brand names or colloquial terms (e.g., "Dolo" -> Paracetamol, "Fevikwik" -> Instant Cyanoacrylate Adhesive, "1 inch CPVC" -> Plumbing Pipe).
+   - Extract canonical product and resolve brand names or colloquial terms (e.g., "Dolo" -> Paracetamol, "Fevikwik" -> Instant Adhesive, "1 inch CPVC" -> Plumbing Pipe).
 2. Retail Context Reasoning (Indian Market Dynamics):
    - Identify where this item is typically bought in tier-2/3 Indian towns and cities:
      * Hardware / Electrical Stores: PVC/CPVC pipes, wires, switchboards, tools, adhesives, paints.
@@ -287,31 +309,30 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
         properties: {
           intentAnalysis: { 
             type: SchemaType.STRING, 
-            description: "Step 1: Breakdown of the user's input, detected language, and canonical product identification." 
+            description: "Step 1: Breakdown of user input and canonical product identification." 
           },
           marketStockLocation: { 
             type: SchemaType.STRING, 
-            description: "Step 2: Concrete reasoning on where this specific product is physically sold in an Indian market." 
+            description: "Step 2: Reasoning on where this specific product is sold in an Indian physical market." 
           },
           targetStrategy: { 
             type: SchemaType.STRING, 
-            description: "Step 3: Justification for selected Google Places types and search keywords." 
+            description: "Step 3: Justification for selected Google Places types and search query." 
           }
         },
         required: ["intentAnalysis", "marketStockLocation", "targetStrategy"]
       },
       language: { type: SchemaType.STRING, enum: ["en", "ta", "tanglish"] },
-      productName: { type: SchemaType.STRING, description: "Canonical product name in English" },
-      localizedName: { type: SchemaType.STRING, description: "Product name translated into Tamil script" },
-      category: { type: SchemaType.STRING, description: "Display category with appropriate emoji (e.g., '🔧 Hardware & Plumbing')" },
-      headingLabel: { type: SchemaType.STRING, description: "Plural target store name in English (e.g., 'Hardware & Plumbing Stores')" },
-      headingLabelTamil: { type: SchemaType.STRING, description: "Plural target store name in Tamil script (e.g., 'ஹார்டுவேர் & பிளம்பிங் கடைகள்')" },
+      productName: { type: SchemaType.STRING },
+      localizedName: { type: SchemaType.STRING },
+      category: { type: SchemaType.STRING },
+      headingLabel: { type: SchemaType.STRING },
+      headingLabelTamil: { type: SchemaType.STRING },
       placeTypes: {
         type: SchemaType.ARRAY,
-        items: { type: SchemaType.STRING },
-        description: "Official Google Places API types (e.g. ['hardware_store', 'home_improvement_store'])"
+        items: { type: SchemaType.STRING }
       },
-      cleanQuery: { type: SchemaType.STRING, description: "Short 2-3 word query for Maps search (e.g., 'hardware electrical plumbing')" }
+      cleanQuery: { type: SchemaType.STRING }
     },
     required: [
       "reasoning",
@@ -326,27 +347,51 @@ Your goal is to perform multi-step cognitive reasoning to determine the exact ph
     ]
   };
 
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash',
-    systemInstruction,
-    generationConfig: {
-      responseMimeType: 'application/json',
-      responseSchema: jsonSchema,
-      temperature: 0.1
+  // Primary model sequence (covers 2.5, 2.0, and 1.5 variants)
+  const modelsToTry = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash'
+  ];
+
+  let lastError = null;
+
+  for (const modelName of modelsToTry) {
+    try {
+      const model = genAI.getGenerativeModel(
+        {
+          model: modelName,
+          systemInstruction,
+          generationConfig: {
+            responseMimeType: 'application/json',
+            responseSchema: jsonSchema,
+            temperature: 0.1
+          }
+        },
+        { apiVersion: 'v1' } // Force stable v1 endpoint
+      );
+
+      const prompt = `Perform multi-step agent reasoning for this item search: "${userInput}"`;
+      const result = await model.generateContent(prompt);
+      const rawText = result.response.text();
+      const decision = safeParseJson(rawText);
+
+      if (decision && decision.category && decision.placeTypes) {
+        console.log(`✅ Gemini success using model: ${modelName}`);
+        console.log('🤖 [Agentic CoT Analysis]:');
+        console.log(` ↳ Intent: ${decision.reasoning?.intentAnalysis}`);
+        console.log(` ↳ Market Logic: ${decision.reasoning?.marketStockLocation}`);
+        console.log(` ↳ Search Strategy: ${decision.reasoning?.targetStrategy}`);
+        return decision;
+      }
+    } catch (err) {
+      console.warn(`⚠️ Model ${modelName} attempt notice: ${err.message}`);
+      lastError = err;
     }
-  });
+  }
 
-  const prompt = `Perform multi-step agent reasoning for this item search: "${userInput}"`;
-  const result = await model.generateContent(prompt);
-  const decision = JSON.parse(result.response.text());
-
-  // Observability: Log Chain-of-Thought Steps
-  console.log('🤖 [Agentic CoT Analysis]:');
-  console.log(` ↳ Intent: ${decision.reasoning?.intentAnalysis}`);
-  console.log(` ↳ Market Logic: ${decision.reasoning?.marketStockLocation}`);
-  console.log(` ↳ Search Strategy: ${decision.reasoning?.targetStrategy}`);
-
-  return decision;
+  throw new Error(`AI Agent reasoning failed: ${lastError?.message || 'Check GEMINI_API_KEY validity'}`);
 }
 
 // 8. Hyperlocal Google Places API Search
